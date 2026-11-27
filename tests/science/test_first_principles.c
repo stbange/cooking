@@ -7,6 +7,9 @@
 #include "fd_sim.h"
 #include "fd_vfs.h"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>

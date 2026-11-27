@@ -13,11 +13,23 @@
 #include "fd_ui.h"
 #include "fd_vfs.h"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static void set_env_var(const char *k, const char *v) {
+#ifdef _WIN32
+    _putenv_s(k, v ? v : "");
+#else
+    if (v && v[0] != '\0') setenv(k, v, 1);
+    else unsetenv(k);
+#endif
+}
 
 static void test_vfs_module(void) {
     assert(!fd_vfs_valid_relpath(NULL));
@@ -46,10 +58,10 @@ static void test_vfs_module(void) {
     fd_vfs_init(&vfs, "assets", NULL);
     assert(strcmp(vfs.base_dir, "assets") == 0);
 
-    setenv("FATDUCK_ASSETS_DIR", "assets", 1);
+    set_env_var("FATDUCK_ASSETS_DIR", "assets");
     fd_vfs_init(&vfs, NULL, NULL);
     assert(strcmp(vfs.base_dir, "assets") == 0);
-    unsetenv("FATDUCK_ASSETS_DIR");
+    set_env_var("FATDUCK_ASSETS_DIR", NULL);
 
     fd_vfs_init(&vfs, NULL, "./");
     assert(strstr(vfs.base_dir, "assets") != NULL);
