@@ -573,3 +573,49 @@ float fd_lua_call_on_score(fd_lua_t *lua, const fd_metrics_t *m) {
     lua_sethook(L, NULL, 0, 0);
     return bonus;
 }
+
+bool fd_lua_load_string_table(fd_lua_t *lua, const char *rel_path, fd_lua_kv_cb cb, void *ud) {
+    if (!lua || !lua->L || !lua->vfs || !cb || !fd_vfs_valid_relpath(rel_path)) return false;
+    uint8_t *buf = NULL;
+    size_t sz = 0;
+    if (!fd_vfs_read(lua->vfs, rel_path, &buf, &sz)) return false;
+
+    lua_State *L = lua->L;
+    lua->instr_budget = 250000;
+    lua_sethook(L, instr_limit_hook, LUA_MASKCOUNT, 1000);
+
+    char cname[160];
+    snprintf(cname, sizeof(cname), "@%s", rel_path);
+    int st = luaL_loadbufferx(L, (const char *)buf, sz, cname, "t");
+    free(buf);
+    if (st == LUA_OK) st = lua_pcall(L, 0, 1, 0);
+    lua_sethook(L, NULL, 0, 0);
+
+    if (st != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        snprintf(lua->last_error, sizeof(lua->last_error), "%s", err ? err : "locale lua error");
+        lua_pop(L, 1);
+        return false;
+    }
+
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return false;
+    }
+
+    /* Support either { strings = { k = v } } or flat { k = v } */
+    int tbl_idx = lua_gettop(L);
+    lua_getfield(L, tbl_idx, "strings");
+    int iter_idx = lua_istable(L, -1) ? lua_gettop(L) : tbl_idx;
+
+    lua_pushnil(L);
+    while (lua_next(L, iter_idx) != 0) {
+        if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+            cb(lua_tostring(L, -2), lua_tostring(L, -1), ud);
+        }
+        lua_pop(L, 1);
+    }
+
+    lua_settop(L, tbl_idx - 1);
+    return true;
+}

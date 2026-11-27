@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(FatDuck VERSION 1.0.0 LANGUAGES C)
+project(FatDuck VERSION 2.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -17,10 +17,18 @@ if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
     target_compile_definitions(lua54 PRIVATE LUA_USE_POSIX)
 endif()
 
-# 2. Core 3D Culinary Engine + Lua Host + VFS + 2D Immediate UI (100% platform-independent)
+# 2. Vendored ANSI C Nuklear v4.13.4 immediate-mode GUI library (MIT / Public Domain)
+add_library(nuklear STATIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nuklear/nuklear_impl.c")
+target_include_directories(nuklear PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nuklear")
+if(UNIX OR EMSCRIPTEN)
+    target_link_libraries(nuklear PUBLIC m)
+endif()
+
+# 3. Core 3D Culinary Engine + Lua Host + VFS + 20-Language i18n + Nuklear UI (100% platform-independent)
 set(FATDUCK_CORE_SOURCES
     src/core/fd_vfs.c
     src/core/fd_lua.c
+    src/core/fd_i18n.c
     src/core/fd_geometry.c
     src/core/fd_physics.c
     src/core/fd_chemistry.c
@@ -34,7 +42,7 @@ set(FATDUCK_CORE_SOURCES
 
 add_library(fatduck_core STATIC ${FATDUCK_CORE_SOURCES})
 target_include_directories(fatduck_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/core")
-target_link_libraries(fatduck_core PUBLIC lua54)
+target_link_libraries(fatduck_core PUBLIC lua54 nuklear)
 if(UNIX OR EMSCRIPTEN)
     target_link_libraries(fatduck_core PUBLIC m)
 endif()
@@ -50,7 +58,7 @@ if(FATDUCK_COVERAGE AND NOT EMSCRIPTEN)
     target_link_options(fatduck_core PUBLIC --coverage)
 endif()
 
-# 3. SDL3 + OpenGL 3.3 Core / WebGL2 Application
+# 4. SDL3 + OpenGL 3.3 Core / WebGL2 Application
 if(FATDUCK_BUILD_APP)
     add_executable(fatduck
         src/platform/main.c
@@ -70,7 +78,7 @@ if(FATDUCK_BUILD_APP)
             "-sALLOW_MEMORY_GROWTH=1"
             "-sSTACK_SIZE=1048576"
             "-sINITIAL_MEMORY=67108864"
-            "-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_fd_web_push_asset','_fd_web_finish_boot','_fd_web_get_state_json']"
+            "-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_fd_web_push_asset','_fd_web_finish_boot','_fd_web_set_lang','_fd_web_get_state_json']"
             "-sEXPORTED_RUNTIME_METHODS=['UTF8ToString','stringToNewUTF8','HEAPU8']"
             "--shell-file" "${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html"
         )
@@ -113,7 +121,7 @@ if(FATDUCK_BUILD_APP)
     )
 endif()
 
-# 4. Unit, Scientific Verification & Automated Game Tests
+# 5. Unit, Scientific Verification & Automated Game Tests
 if(FATDUCK_BUILD_TESTS AND NOT EMSCRIPTEN)
     enable_testing()
 

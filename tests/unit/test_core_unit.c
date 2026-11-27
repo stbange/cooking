@@ -305,12 +305,129 @@ static void test_solver_propose_and_invent(void) {
     fd_vfs_free(&vfs);
 }
 
+static void dummy_kv_cb(const char *k, const char *v, void *ud) {
+    (void)k; (void)v; (void)ud;
+}
+
+static void test_i18n_and_nuklear_ui(void) {
+    /* UTF-8 decode & encode across 1, 2, 3, 4-byte codepoints + invalid byte */
+    uint32_t cp = 0;
+    char enc[4];
+    assert(fd_utf8_decode("A", &cp) == 1 && cp == 'A');
+    assert(fd_utf8_encode(0x0041u, enc) == 1 && enc[0] == 'A');
+    assert(fd_utf8_decode("\xc3\xa9", &cp) == 2 && cp == 0x00E9u);
+    assert(fd_utf8_encode(0x00E9u, enc) == 2);
+    assert(fd_utf8_decode("\xe4\xb8\xad", &cp) == 3 && cp == 0x4E2Du);
+    assert(fd_utf8_encode(0x4E2Du, enc) == 3);
+    assert(fd_utf8_decode("\xf0\x9f\x8d\xb3", &cp) == 4 && cp == 0x1F373u);
+    assert(fd_utf8_encode(0x1F373u, enc) == 4);
+    assert(fd_utf8_decode("\xff", &cp) == 1 && cp == 0xFFFDu);
+    assert(fd_utf8_decode("", &cp) == 0 && cp == 0);
+
+    /* Language catalog & BCP-47 matching */
+    assert(fd_i18n_find_lang("en-US") == 0);
+    assert(fd_i18n_find_lang("zh-CN") == 1);
+    assert(fd_i18n_find_lang("de-DE") == 11);
+    assert(fd_i18n_find_lang("ar-SA") == 5);
+    assert(fd_i18n_find_lang("ko-KR") == 19);
+    assert(fd_i18n_find_lang("xx-UNKNOWN") == 0);
+    assert(fd_i18n_find_lang(NULL) == 0);
+    assert(strcmp(fd_i18n_lang_info(-1)->code, "en") == 0);
+    assert(strcmp(fd_i18n_lang_info(999)->code, "en") == 0);
+
+    fd_vfs_t vfs; fd_database_t db; fd_lua_t lua; fd_i18n_t i18n;
+    memset(&db, 0, sizeof(db));
+    fd_vfs_init(&vfs, "assets", NULL);
+    assert(fd_lua_init(&lua, &vfs, &db));
+    assert(fd_lua_exec_file(&lua, "scripts/init.lua", 2000000));
+    assert(fd_i18n_init(&i18n, &lua, "en"));
+    assert(strcmp(fd_tr(&i18n, "tab_workbench"), "Kitchen Lab") == 0);
+    assert(strcmp(fd_tr(&i18n, "nonexistent_key_xyz"), "nonexistent_key_xyz") == 0);
+    assert(strcmp(fd_tr(NULL, "tab_workbench"), "tab_workbench") == 0);
+    assert(strcmp(fd_tr(&i18n, NULL), "") == 0);
+
+    /* Load all 20 world languages & verify rune extraction + menu labels */
+    uint32_t ranges[2048];
+    for (int i = 0; i < FD_LANG_COUNT; i++) {
+        assert(fd_i18n_set_lang(&i18n, &lua, i));
+        assert(strlen(fd_tr(&i18n, "tab_workbench")) > 0);
+        assert(strlen(fd_tr(&i18n, "help_title")) > 0);
+        assert(strlen(fd_tr(&i18n, "tut_1_title")) > 0);
+        char lbl[64];
+        fd_i18n_lang_menu_label(&i18n, i, lbl, sizeof(lbl));
+        assert(lbl[0] == '[');
+        int nr = fd_i18n_build_rune_ranges(&i18n, ranges, 2048);
+        if (fd_i18n_lang_info(i)->font_path != NULL) assert(nr > 0);
+    }
+
+    /* Verify Arabic RTL shaping connects letters & keeps embedded "180°C" LTR */
+    assert(fd_i18n_set_lang(&i18n, &lua, fd_i18n_find_lang("ar")));
+    char shaped[256];
+    fd_i18n_shape_text(&i18n, "\xd8\xa7\xd9\x84\xd8\xad\xd8\xb1\xd8\xa7\xd8\xb1\xd8\xa9 (180\xc2\xb0""C)\n\xd9\x84\xd8\xa7", shaped, sizeof(shaped));
+    assert(strstr(shaped, "180\xc2\xb0""C") != NULL);
+    /* Lam-Alef ligature U+FEFB (\xef\xbb\xbb) present on second line */
+    assert(strstr(shaped, "\xef\xbb\xbb") != NULL);
+    /* Non-Arabic string passes through unchanged */
+    fd_i18n_shape_text(&i18n, "180C", shaped, sizeof(shaped));
+    assert(strcmp(shaped, "180C") == 0);
+
+    /* Verify Urdu shaping + Indic pre-base matra reordering (Hindi 'हिन्दी') */
+    assert(fd_i18n_set_lang(&i18n, &lua, fd_i18n_find_lang("ur")));
+    fd_i18n_shape_text(&i18n, "\xd9\xbe\xda\xa9\xd8\xa7\xd8\xa6\xdb\x8c\xda\xba", shaped, sizeof(shaped));
+    assert(strlen(shaped) > 0);
+
+    assert(fd_i18n_set_lang(&i18n, &lua, fd_i18n_find_lang("hi")));
+    fd_i18n_shape_text(&i18n, "\xe0\xa4\xb9\xe0\xa4\xbf", shaped, sizeof(shaped));
+    uint32_t first_cp = 0;
+    fd_utf8_decode(shaped, &first_cp);
+    assert(first_cp == 0x093Fu); /* Pre-base short-i matra visually precedes ह */
+
+    /* Lua string table error branches */
+    assert(!fd_lua_load_string_table(&lua, "../bad.lua", NULL, NULL));
+    fd_vfs_put(&vfs, "locales/broken.lua", "return 123", 10, true);
+    assert(!fd_lua_load_string_table(&lua, "locales/broken.lua", dummy_kv_cb, NULL));
+    fd_vfs_put(&vfs, "locales/syntax.lua", "return ((", 9, true);
+    assert(!fd_lua_load_string_table(&lua, "locales/syntax.lua", dummy_kv_cb, NULL));
+
+    /* Nuklear UI initialization, Noto font rebuilding (Latin, CJK, Arabic, fallback), & legend modes */
+    fd_ui_t ui;
+    assert(fd_i18n_set_lang(&i18n, &lua, 0));
+    assert(fd_ui_init(&ui, &vfs, &i18n));
+    assert(ui.atlas_rgba != NULL && ui.atlas_w > 0 && ui.atlas_h > 0);
+    assert(fd_i18n_set_lang(&i18n, &lua, fd_i18n_find_lang("zh")));
+    assert(fd_ui_rebuild_fonts(&ui, &vfs, &i18n, 2.0f));
+    assert(fd_ui_rebuild_fonts(&ui, NULL, NULL, 1.0f)); /* Default baked Nuklear fallback */
+
+    fd_input_t in;
+    memset(&in, 0, sizeof(in));
+    in.width = 1024.0f; in.height = 640.0f; in.scroll_y = 1.0f;
+    fd_ui_begin(&ui, &in, false);
+    if (nk_begin(&ui.nk, "u_test", nk_rect(0, 0, 400, 400), NK_WINDOW_BORDER)) {
+        for (int m = 0; m < 5; m++) {
+            nk_layout_row_dynamic(&ui.nk, 44.0f, 1);
+            fd_ui_draw_legend_bar(&ui.nk, (fd_overlay_mode_t)m, "Cold", "Hot");
+        }
+        nk_layout_row_dynamic(&ui.nk, 24.0f, 1);
+        fd_ui_badge(&ui.nk, "OK", nk_rgba(50, 200, 120, 255), nk_rgba(10, 10, 10, 255));
+        fd_ui_tooltip(&ui.nk, "Tip", false);
+    }
+    nk_end(&ui.nk);
+    fd_ui_end(&ui);
+    assert(ui.vert_count > 0 && ui.index_count > 0 && ui.cmd_count > 0);
+
+    fd_ui_free(&ui);
+    fd_i18n_free(&i18n);
+    fd_lua_free(&lua);
+    fd_vfs_free(&vfs);
+}
+
 int main(void) {
     test_vfs_module();
     test_lua_sandbox_and_errors();
     test_geometry_all_shapes_and_slices();
     test_physics_chemistry_biology_edge_cases();
     test_solver_propose_and_invent();
+    test_i18n_and_nuklear_ui();
     printf("ALL CORE UNIT TESTS PASSED.\n");
     return 0;
 }

@@ -36,4 +36,8 @@ int fd_db_find_ingredient(const fd_database_t *db, const char *id);
 int fd_db_find_technique(const fd_database_t *db, const char *id);
 int fd_db_find_recipe(const fd_database_t *db, const char *id);
 
+/* Load a flat key->string Lua table (or table.strings) from VFS inside the sandbox */
+typedef void (*fd_lua_kv_cb)(const char *key, const char *val, void *ud);
+bool fd_lua_load_string_table(fd_lua_t *lua, const char *rel_path, fd_lua_kv_cb cb, void *ud);
+
 #endif /* FD_LUA_H */

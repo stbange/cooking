@@ -29,7 +29,7 @@ typedef struct {
 static fd_host_t *g_host = NULL;
 
 #ifdef __EMSCRIPTEN__
-static char g_state_json[512];
+static char g_state_json[640];
 
 EM_JS(void, js_start_asset_fetch, (void), {
     (async function() {
@@ -42,7 +42,9 @@ EM_JS(void, js_start_asset_fetch, (void), {
                 const mb = enc.encode(text);
                 const ptr = Module._malloc(mb.length);
                 Module.HEAPU8.set(mb, ptr);
-                Module._fd_web_push_asset(Module.stringToNewUTF8('manifest.json'), ptr, mb.length, 0);
+                const sp = Module.stringToNewUTF8('manifest.json');
+                Module._fd_web_push_asset(sp, ptr, mb.length, 0);
+                Module._free(sp);
                 Module._free(ptr);
             }
             await Promise.all(paths.map(async (p) => {
@@ -56,7 +58,7 @@ EM_JS(void, js_start_asset_fetch, (void), {
                 Module._free(sp);
                 Module._free(ptr);
             }));
-            /* Overlay any persisted localStorage Lua mod overrides */
+            /* Overlay persisted localStorage Lua / locale overrides */
             for (let i = 0; i < window.localStorage.length; i++) {
                 const k = window.localStorage.key(i);
                 if (k && k.startsWith('fatduck_mod:')) {
@@ -72,7 +74,10 @@ EM_JS(void, js_start_asset_fetch, (void), {
                 }
             }
             const isMobile = (navigator.maxTouchPoints > 0) || (window.innerWidth < 820);
-            Module._fd_web_finish_boot(isMobile ? 1 : 0);
+            const savedLang = window.localStorage.getItem('fatduck_lang') || navigator.language || 'en';
+            const lp = Module.stringToNewUTF8(savedLang);
+            Module._fd_web_finish_boot(isMobile ? 1 : 0, lp);
+            Module._free(lp);
         } catch (err) {
             console.error('FatDuck web asset bootstrap failed:', err);
         }
@@ -87,12 +92,16 @@ EM_JS(void, js_sync_local_mod, (const char *rel_path, const char *content, int a
     } catch (e) {}
 });
 
+EM_JS(void, js_save_lang, (const char *code), {
+    try { window.localStorage.setItem('fatduck_lang', UTF8ToString(code)); } catch (e) {}
+});
+
 EMSCRIPTEN_KEEPALIVE void fd_web_push_asset(const char *rel_path, const uint8_t *data, int len, int is_override) {
     if (!g_host || !rel_path || len < 0) return;
     fd_vfs_put(&g_host->app.vfs, rel_path, data, (size_t)len, is_override != 0);
 }
 
-EMSCRIPTEN_KEEPALIVE void fd_web_finish_boot(int is_mobile_touch) {
+EMSCRIPTEN_KEEPALIVE void fd_web_finish_boot(int is_mobile_touch, const char *lang_code) {
     if (!g_host || g_host->booted) return;
     fd_app_t *app = &g_host->app;
     if (!fd_lua_init(&app->lua, &app->vfs, &app->db) ||
@@ -100,8 +109,15 @@ EMSCRIPTEN_KEEPALIVE void fd_web_finish_boot(int is_mobile_touch) {
         SDL_Log("FatDuck Lua boot failed: %s", app->lua.last_error);
         return;
     }
-    app->time_scale   = 5.0f;
-    app->slice_plane  = FD_SLICE_XZ;
+    fd_i18n_init(&app->i18n, &app->lua, lang_code ? lang_code : "en");
+    if (!fd_ui_init(&app->ui, &app->vfs, &app->i18n)) {
+        SDL_Log("FatDuck Nuklear UI init failed");
+        return;
+    }
+    app->time_scale       = 5.0f;
+    app->show_welcome     = true;
+    app->pending_lang_idx = -1;
+    app->slice_plane      = FD_SLICE_XZ;
     app->slice_norm   = 0.5f;
     app->overlay_mode = FD_OVERLAY_TEMP;
     app->touch_mode   = (is_mobile_touch != 0);
@@ -109,6 +125,10 @@ EMSCRIPTEN_KEEPALIVE void fd_web_finish_boot(int is_mobile_touch) {
     if (app->db.recipe_count > 0) fd_app_load_recipe_index(app, 0);
 
     fd_gl_init(&g_host->gl, &app->vfs);
+    if (app->ui.atlas_dirty && app->ui.atlas_rgba) {
+        fd_gl_update_font_tex(&g_host->gl, app->ui.atlas_rgba, app->ui.atlas_w, app->ui.atlas_h);
+        app->ui.atlas_dirty = false;
+    }
     fd_audio_init(&g_host->audio, &app->vfs);
     if (app->slice_dirty) {
         fd_gl_update_slice_tex(&g_host->gl, app->slice_rgba, app->slice_w, app->slice_h);
@@ -117,15 +137,30 @@ EMSCRIPTEN_KEEPALIVE void fd_web_finish_boot(int is_mobile_touch) {
     g_host->booted = true;
 }
 
+EMSCRIPTEN_KEEPALIVE void fd_web_set_lang(const char *code) {
+    if (!g_host || !g_host->booted || !code) return;
+    fd_app_set_language(&g_host->app, fd_i18n_find_lang(code));
+}
+
 EMSCRIPTEN_KEEPALIVE const char *fd_web_get_state_json(void) {
     if (!g_host) return "{}";
     const fd_app_t *a = &g_host->app;
+    const fd_lang_info_t *li = fd_i18n_lang_info(a->i18n.active_lang);
     snprintf(g_state_json, sizeof(g_state_json),
-             "{\"booted\":%s,\"touch_mode\":%s,\"tab\":%d,\"ingredients\":%d,"
-             "\"techniques\":%d,\"recipes\":%d,\"mods\":%d,\"score\":%.2f,\"core_c\":%.2f}",
+             "{\"booted\":%s,\"ui\":\"nuklear\",\"touch_mode\":%s,\"tab\":%d,"
+             "\"lang\":\"%s\",\"lang_count\":%d,\"help_open\":%s,"
+             "\"tutorial_open\":%s,\"tutorial_step\":%d,\"vert_count\":%d,"
+             "\"ingredients\":%d,\"techniques\":%d,\"recipes\":%d,\"mods\":%d,"
+             "\"score\":%.2f,\"core_c\":%.2f}",
              g_host->booted ? "true" : "false",
              a->touch_mode ? "true" : "false",
              (int)a->active_tab,
+             li->code,
+             FD_LANG_COUNT,
+             a->help_open ? "true" : "false",
+             a->tutorial_open ? "true" : "false",
+             a->tutorial_step,
+             a->ui.vert_count,
              a->db.ingredient_count,
              a->db.technique_count,
              a->db.recipe_count,
@@ -166,7 +201,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 #ifndef __EMSCRIPTEN__
     wflags |= SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 #endif
-    h->window = SDL_CreateWindow("FatDuck — 3D First-Principles Culinary Lab", 1180, 720, wflags);
+    h->window = SDL_CreateWindow("FatDuck — 3D First-Principles Culinary Lab", 1240, 760, wflags);
     if (!h->window) {
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         return SDL_APP_FAILURE;
@@ -187,7 +222,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     js_start_asset_fetch();
 #else
     const char *base = SDL_GetBasePath();
-    if (!fd_app_init(&h->app, NULL, base)) {
+    const char *env_lang = getenv("FATDUCK_LANG");
+    if (!fd_app_init_with_lang(&h->app, NULL, base, env_lang ? env_lang : "en")) {
         SDL_Log("fd_app_init failed: %s", h->app.status_msg);
         return SDL_APP_FAILURE;
     }
@@ -201,6 +237,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
         SDL_Log("fd_gl_init failed");
         return SDL_APP_FAILURE;
     }
+    if (h->app.ui.atlas_dirty && h->app.ui.atlas_rgba) {
+        fd_gl_update_font_tex(&h->gl, h->app.ui.atlas_rgba, h->app.ui.atlas_w, h->app.ui.atlas_h);
+        h->app.ui.atlas_dirty = false;
+    }
     fd_audio_init(&h->audio, &h->app.vfs);
     h->booted = true;
 #endif
@@ -211,7 +251,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *ev) {
     fd_host_t *h = (fd_host_t *)appstate;
     if (!h) return SDL_APP_CONTINUE;
 
-    int win_w = 1180, win_h = 720;
+    int win_w = 1240, win_h = 760;
     SDL_GetWindowSize(h->window, &win_w, &win_h);
 
     switch (ev->type) {
@@ -220,6 +260,9 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *ev) {
         case SDL_EVENT_MOUSE_MOTION:
             h->input.pointer_x = ev->motion.x;
             h->input.pointer_y = ev->motion.y;
+            break;
+        case SDL_EVENT_MOUSE_WHEEL:
+            h->input.scroll_y += ev->wheel.y;
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
             if (ev->button.button == SDL_BUTTON_LEFT) {
@@ -249,6 +292,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *ev) {
             h->input.is_touch_event = true;
             h->input.pointer_x      = ev->tfinger.x * (float)win_w;
             h->input.pointer_y      = ev->tfinger.y * (float)win_h;
+            h->input.scroll_y      += ev->tfinger.dy * 10.0f;
             break;
         case SDL_EVENT_FINGER_UP:
             h->input.is_touch_event   = true;
@@ -258,7 +302,12 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *ev) {
             h->input.pointer_released = true;
             break;
         case SDL_EVENT_KEY_DOWN:
-            if (ev->key.key == SDLK_ESCAPE) return SDL_APP_SUCCESS;
+            if (ev->key.key == SDLK_ESCAPE) {
+                if (h->app.help_open) { h->app.help_open = false; break; }
+                if (h->app.tutorial_open) { h->app.tutorial_open = false; break; }
+                return SDL_APP_SUCCESS;
+            }
+            if (ev->key.key == SDLK_F1)     h->input.key_help   = true;
             if (ev->key.key == SDLK_SPACE)  h->input.key_space  = true;
             if (ev->key.key == SDLK_F)      h->input.key_flip   = true;
             if (ev->key.key == SDLK_F5)     h->input.key_reload = true;
@@ -281,22 +330,36 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     float dt = (float)((double)(now - h->last_ticks_ns) * 1e-9);
     h->last_ticks_ns = now;
 
-    int log_w = 1180, log_h = 720, pix_w = 1180, pix_h = 720;
+    int log_w = 1240, log_h = 760, pix_w = 1240, pix_h = 760;
     SDL_GetWindowSize(h->window, &log_w, &log_h);
     SDL_GetWindowSizeInPixels(h->window, &pix_w, &pix_h);
-    h->input.width  = (float)log_w;
-    h->input.height = (float)log_h;
+    h->input.width     = (float)(log_w > 0 ? log_w : 1240);
+    h->input.height    = (float)(log_h > 0 ? log_h : 760);
+    h->input.dpi_scale = (log_w > 0) ? ((float)pix_w / (float)log_w) : 1.0f;
 
     if (h->booted) {
         fd_app_update_and_render(&h->app, &h->input, dt);
+
+        if (h->app.ui.atlas_dirty && h->app.ui.atlas_rgba) {
+            fd_gl_update_font_tex(&h->gl, h->app.ui.atlas_rgba, h->app.ui.atlas_w, h->app.ui.atlas_h);
+            h->app.ui.atlas_dirty = false;
+        }
         if (h->app.slice_dirty) {
             fd_gl_update_slice_tex(&h->gl, h->app.slice_rgba, h->app.slice_w, h->app.slice_h);
             h->app.slice_dirty = false;
+        }
+        if (h->app.pending_url[0] != '\0') {
+            SDL_OpenURL(h->app.pending_url);
+            h->app.pending_url[0] = '\0';
         }
         fd_gl_render(&h->gl, &h->app.ui, pix_w, pix_h);
         fd_audio_update(&h->audio, h->app.sim.sizzle_flux, h->app.sim.boil_flux, h->app.pending_cue);
 
 #ifdef __EMSCRIPTEN__
+        if (h->app.lang_changed) {
+            h->app.lang_changed = false;
+            js_save_lang(fd_i18n_lang_info(h->app.i18n.active_lang)->code);
+        }
         if (h->app.mod_boost_enabled != h->prev_mod_boost) {
             h->prev_mod_boost = h->app.mod_boost_enabled;
             uint8_t *mbuf = NULL;
@@ -312,6 +375,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     }
 
     /* Reset single-frame edge flags */
+    h->input.scroll_y         = 0.0f;
     h->input.pointer_pressed  = false;
     h->input.pointer_released = false;
     h->input.is_touch_event   = false;
@@ -319,6 +383,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     h->input.key_flip         = false;
     h->input.key_reload       = false;
     h->input.key_plane        = false;
+    h->input.key_help         = false;
     h->input.speed_key        = 0;
 
     SDL_GL_SwapWindow(h->window);

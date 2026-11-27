@@ -1,0 +1,10 @@
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+
+The Noto Sans and Noto Sans CJK font subsets in this directory are derived from
+Google Noto Fonts (https://github.com/notofonts), Copyright (c) Google LLC,
+licensed under the SIL Open Font License, Version 1.1 (OFL-1.1).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+the Font Software, to use, study, copy, merge, embed, modify, redistribute, and
+sell modified and unmodified copies of the Font Software, subject to the full
+terms of the SIL Open Font License 1.1: https://openfontlicense.org/
