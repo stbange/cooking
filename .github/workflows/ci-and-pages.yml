@@ -1,0 +1,130 @@
+name: CI & GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages-main"
+  cancel-in-progress: true
+
+jobs:
+  linux-coverage-and-tests:
+    name: Linux Tests, >=95% Coverage & OpenSpec Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build gcovr lcov xvfb \
+            libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxfixes-dev libxss-dev libwayland-dev libxkbcommon-dev \
+            libasound2-dev libpulse-dev
+
+      - name: Validate OpenSpec specifications
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: |
+          OPENSPEC_TELEMETRY=0 npx --yes @fission-ai/openspec@latest validate --all --strict
+
+      - name: Build Debug with Coverage
+        run: |
+          cmake -B build-cov -G Ninja -DFATDUCK_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-cov -j
+
+      - name: Run Unit, 3D Science & Automated Game Replay Tests
+        run: ctest --test-dir build-cov --output-on-failure -V
+
+      - name: Enforce >=95% Core Line Coverage Gate
+        run: ./scripts/check_coverage.sh build-cov 95.0
+
+      - name: Run Real SDL3 + OpenGL 3.3 Headless Smoke Test
+        run: |
+          FATDUCK_AUTOTEST_FRAMES=12 SDL_AUDIODRIVER=dummy LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ./build-cov/fatduck
+
+  native-cross-platform:
+    name: Native Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux X11/Wayland/GL headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1-mesa-dev libx11-dev libxext-dev \
+            libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev libxss-dev \
+            libwayland-dev libxkbcommon-dev libasound2-dev libpulse-dev
+
+      - name: Configure & Build Release
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j
+
+      - name: Run Automated CTest Suite
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  web-emscripten-and-e2e:
+    name: Web Build (Emscripten) & Playwright Mobile/WebGL2 E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build Emscripten WebAssembly + Loose ./assets/
+        run: |
+          python3 tools/gen_assets.py
+          emcmake cmake -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release -DFATDUCK_BUILD_TESTS=OFF
+          cmake --build build-web -j
+          touch build-web/.nojekyll
+
+      - name: Run Playwright Desktop WebGL2 & Mobile Touch E2E Suite
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - name: Stage Clean GitHub Pages Bundle
+        run: |
+          mkdir -p dist-web
+          cp build-web/index.html build-web/index.js build-web/index.wasm dist-web/
+          cp -r assets dist-web/assets
+          touch dist-web/.nojekyll
+
+      - name: Upload GitHub Pages Artifact (main-only, no gh-pages branch)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-web
+
+  deploy-pages:
+    name: Deploy Web Build to GitHub Pages
+    needs: [linux-coverage-and-tests, web-emscripten-and-e2e]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

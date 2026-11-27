@@ -1,0 +1,13 @@
+build/
+build-*/
+dist/
+node_modules/
+playwright-report/
+test-results/
+*.gcda
+*.gcno
+*.gcov
+coverage.info
+coverage/
+.DS_Store
+Thumbs.db

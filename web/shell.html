@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>FatDuck — 3D First-Principles Culinary Simulator</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: #0e1118; color: #e8eef8;
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: hidden; touch-action: none;
+    }
+    #canvas {
+      display: block; width: 100vw; height: 100vh; outline: none;
+    }
+    #loading {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: #0e1118;
+      z-index: 10; pointer-events: none; transition: opacity 0.25s ease;
+    }
+    #loading.hidden { opacity: 0; }
+    .badge { color: #f8c64c; font-weight: 700; font-size: 1.25rem; margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="badge">FatDuck 3D Culinary Lab</div>
+    <div id="status">Fetching external ./assets/ &amp; Lua 5.4 knowledge base...</div>
+  </div>
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <script>
+    var Module = {
+      canvas: (function() { return document.getElementById('canvas'); })(),
+      onRuntimeInitialized: function() {
+        const resize = () => {
+          const c = document.getElementById('canvas');
+          c.width = window.innerWidth;
+          c.height = window.innerHeight;
+        };
+        window.addEventListener('resize', resize);
+        resize();
+        const poll = setInterval(() => {
+          if (Module._fd_web_get_state_json) {
+            const st = JSON.parse(Module.UTF8ToString(Module._fd_web_get_state_json()));
+            if (st.booted) {
+              document.getElementById('loading').classList.add('hidden');
+              clearInterval(poll);
+            }
+          }
+        }, 100);
+      }
+    };
+    window.fatduckDebugState = function() {
+      if (!Module._fd_web_get_state_json) return null;
+      return JSON.parse(Module.UTF8ToString(Module._fd_web_get_state_json()));
+    };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

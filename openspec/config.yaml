@@ -1,0 +1,9 @@
+schema: spec-driven
+
+context: |
+  Follow Ponytail (AGENTS.md): solve the whole problem with the least new C11 code and minimal dependencies.
+  Target Linux, Windows, macOS, and Web (Emscripten WebGL2) from a single C11 + SDL3 + OpenGL + Lua 5.4 codebase.
+  Assets (graphics, fonts, sounds, shaders, Lua scripts) must never be baked into the executable; load from ./assets/ on Desktop and fetch via ./assets/manifest.json on Web.
+  Enforce >=95% unit test line coverage on src/core/, plus automated headless game replay tests and Playwright WebGL2/mobile-touch E2E tests.
+  Code and scripts are MIT licensed; art, fonts, and audio in ./assets/ are CC BY 4.0 licensed.
+  Use the main branch only and deploy the Web build to GitHub Pages via GitHub Actions artifacts.
