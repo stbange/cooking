@@ -277,6 +277,63 @@ void fd_grid_toss_cubes(fd_grid_t *g) {
     fd_grid_flip_z(g);
 }
 
+bool fd_grid_resize_preserve(fd_grid_t *g, fd_shape_type_t new_shape,
+                             float lx_mm, float ly_mm, float lz_mm, bool coarse_mode) {
+    if (!g || !g->tissue || g->active_count <= 0) return false;
+    float aniso = g->fiber_anisotropy;
+    float avg_t = 0.0f, avg_w = 0.0f, avg_fat = 0.0f, avg_salt = 0.0f;
+    float avg_mail = 0.0f, avg_cara = 0.0f, avg_char = 0.0f;
+    float avg_myo = 0.0f, avg_act = 0.0f, avg_alb = 0.0f, avg_gel = 0.0f;
+    float avg_sg = 0.0f, avg_sr = 0.0f, avg_por = 0.0f, min_leth = 1e9f;
+    int cnt = 0;
+
+    for (int i = 0; i < g->count; i++) {
+        if (g->tissue[i] == FD_TISSUE_EMPTY) continue;
+        avg_t    += g->T[i];
+        avg_w    += g->W[i] + g->ice[i];
+        avg_fat  += g->fat[i];
+        avg_salt += g->salt[i];
+        avg_mail += g->maillard[i];
+        avg_cara += g->caramel[i];
+        avg_char += g->char_level[i];
+        avg_myo  += g->denat_myosin[i];
+        avg_act  += g->denat_actin[i];
+        avg_alb  += g->denat_albumen[i];
+        avg_gel  += g->gelatin[i];
+        avg_sg   += g->starch_gel[i];
+        avg_sr   += g->starch_retro[i];
+        avg_por  += g->porosity[i];
+        if (g->tissue[i] != FD_TISSUE_BONE && g->lethality_log10[i] < min_leth) {
+            min_leth = g->lethality_log10[i];
+        }
+        cnt++;
+    }
+    if (cnt <= 0) return false;
+    float inv = 1.0f / (float)cnt;
+    if (min_leth > 1e8f) min_leth = 0.0f;
+
+    int nx = 1, ny = 1, nz = 1;
+    fd_geometry_choose_dims(new_shape, lx_mm, ly_mm, lz_mm, coarse_mode, &nx, &ny, &nz);
+    if (!fd_grid_alloc(g, nx, ny, nz, lx_mm, ly_mm, lz_mm)) return false;
+    fd_grid_rasterize(g, new_shape, avg_t * inv, avg_w * inv, avg_fat * inv, avg_salt * inv, aniso);
+
+    for (int i = 0; i < g->count; i++) {
+        if (g->tissue[i] == FD_TISSUE_EMPTY) continue;
+        g->maillard[i]        = avg_mail * inv;
+        g->caramel[i]         = avg_cara * inv;
+        g->char_level[i]      = avg_char * inv;
+        g->denat_myosin[i]    = avg_myo * inv;
+        g->denat_actin[i]     = avg_act * inv;
+        g->denat_albumen[i]   = avg_alb * inv;
+        g->gelatin[i]         = avg_gel * inv;
+        g->starch_gel[i]      = avg_sg * inv;
+        g->starch_retro[i]    = avg_sr * inv;
+        g->porosity[i]        = avg_por * inv;
+        g->lethality_log10[i] = min_leth;
+    }
+    return true;
+}
+
 static void color_ramp(float u, uint8_t r0, uint8_t g0, uint8_t b0,
                        uint8_t r1, uint8_t g1, uint8_t b1, uint8_t *out) {
     u = clampf(u, 0.0f, 1.0f);

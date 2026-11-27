@@ -334,9 +334,9 @@ void fd_physics_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_sec)
                     }
                 }
                 if (air_faces > 0) {
-                    float rh = sim->lid_closed ? fmaxf(tech->ambient_humidity, 0.85f) : tech->ambient_humidity;
+                    float rh = sim->lid_closed ? fmaxf(tech->ambient_humidity, 0.88f) : tech->ambient_humidity;
                     float w_sat_s = 0.0046f * expf(0.052f * clampf(g->T[i], 0.0f, 92.0f));
-                    float w_amb   = rh * 0.025f;
+                    float w_amb   = sim->lid_closed ? (rh * w_sat_s) : (rh * 0.025f);
                     float drive   = fmaxf(0.0f, aw * w_sat_s - w_amb);
                     float g_mass  = ((float)air_faces * fmaxf(tech->h_top, 12.0f)) / (1006.0f * rho_arr[i] * fmaxf(g->dz, 0.004f));
                     dw_evap += fminf(g->W[i] - 0.012f, g_mass * drive * dt);
@@ -409,21 +409,64 @@ void fd_physics_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_sec)
     sim->sizzle_flux = clampf(total_sizzle / (float)(n_sub * fmaxf(1, g->active_count / 8)), 0.0f, 1.0f);
     sim->boil_flux   = clampf(total_boil   / (float)(n_sub * fmaxf(1, g->active_count)), 0.0f, 1.0f);
 
-    /* 5. Krieger-Dougherty Emulsion Rheology & Stability */
+    /* 5. Movement Shear (Foam Whipping & Emulsion Droplet Breakup) & Resting Reabsorption */
+    float shear = tech->shear_rate + sim->shear_boost;
+    sim->emulsion_shear_integral += shear * dt_sec;
+
+    /* Off-heat resting myofibril juice reabsorption after thermal myosin denaturation */
+    int cidx = fd_grid_idx(g, g->nx / 2, g->ny / 2, g->nz / 2);
+    if (sim->ambient_temp_c <= 48.0f && g->denat_myosin[cidx] > 0.30f && x_prot > 0.08f) {
+        float prev_rest = sim->rested_frac;
+        sim->rested_frac = clampf(sim->rested_frac + (1.0f - sim->rested_frac) * (1.0f - expf(-dt_sec / 220.0f)), 0.0f, 1.0f);
+        float d_rest = sim->rested_frac - prev_rest;
+        if (d_rest > 0.0f) {
+            for (int i = 0; i < g->count; i++) {
+                if (g->tissue[i] != FD_TISSUE_EMPTY && g->tissue[i] != FD_TISSUE_BONE) {
+                    g->W[i] = clampf(g->W[i] + 0.032f * d_rest, 0.008f, 0.96f);
+                }
+            }
+            sim->total_water_g += 0.032f * d_rest * sim->raw_weight_g;
+        }
+    }
+
+    /* Mechanical whipping incorporates air bubbles into protein/lecithin foams below coagulation */
+    if (shear >= 45.0f && (sim->dry_protein_g > 1.2f || sim->emulsifier_units > 2.0f) && g->T[cidx] < 68.0f) {
+        float fat_damp = clampf(1.0f - 0.55f * (sim->total_fat_g / fmaxf(10.0f, sim->raw_weight_g)), 0.25f, 1.0f);
+        float d_foam = 0.000045f * shear * dt_sec * fat_damp * fmaxf(0.0f, 0.68f - sim->foam_air);
+        sim->foam_air = clampf(sim->foam_air + d_foam, 0.0f, 0.70f);
+        sim->whip_overwork += 0.0000022f * shear * dt_sec * fat_damp;
+        if (sim->whip_overwork > 1.35f) sim->foam_air *= 0.92f;
+        for (int i = 0; i < g->count; i++) {
+            if (g->tissue[i] != FD_TISSUE_EMPTY) g->porosity[i] = clampf(fmaxf(g->porosity[i], sim->foam_air), 0.0f, 0.78f);
+        }
+    }
+
+    /* 6. Krieger-Dougherty Emulsion Rheology & Stability (liquid sauces & starch-emulsified pasta) */
     float tot_liq = sim->total_water_g + fmaxf(0.0f, sim->total_fat_g + sim->absorbed_oil_g);
     float phi_oil = (tot_liq > 1.0f) ? clampf((sim->total_fat_g + sim->absorbed_oil_g) / tot_liq, 0.0f, 0.95f) : 0.0f;
-    float shear   = tech->shear_rate + sim->shear_boost;
-    float starch_shield = g->starch_gel[0] * (sim->dry_starch_g / fmaxf(sim->raw_weight_g, 1.0f)) * 4.5f;
+    float raw_starch_shield = g->starch_gel[cidx] * (sim->dry_starch_g / fmaxf(sim->raw_weight_g, 1.0f)) * 4.5f;
+    float starch_shield = (g->count == 1) ? raw_starch_shield : fminf(raw_starch_shield, 0.20f);
     float emul_cap = (sim->emulsifier_units / fmaxf(10.0f, sim->total_fat_g + 5.0f)) + starch_shield;
 
     float stab = 1.0f;
-    if (g->count == 1 && phi_oil > 0.08f && (1.0f - phi_oil) > 0.08f) {
-        float phi_max = clampf(0.28f + 0.54f * clampf(emul_cap, 0.0f, 1.2f), 0.28f, 0.84f);
-        if (shear < 5.0f && emul_cap < 0.35f) stab *= 0.35f;
+    if ((g->count == 1 || sim->emulsifier_units > 2.5f) && phi_oil > 0.08f && (1.0f - phi_oil) > 0.08f) {
+        int bot_idx = fd_grid_idx(g, g->nx / 2, g->ny / 2, 0);
+        if (g->tissue[bot_idx] == FD_TISSUE_EMPTY) bot_idx = cidx;
+        float shear_bonus = clampf(sim->emulsion_shear_integral / 900.0f, 0.0f, 0.14f);
+        float phi_max = clampf(0.28f + 0.54f * clampf(emul_cap, 0.0f, 1.2f) + shear_bonus, 0.28f, 0.86f);
+        if (shear < 5.0f && sim->emulsion_shear_integral < 320.0f && emul_cap < 0.45f) stab *= 0.35f;
         if (phi_oil > phi_max) stab *= clampf(1.0f - 3.5f * (phi_oil - phi_max), 0.05f, 1.0f);
-        /* Thermal curdling of unshielded egg/dairy emulsifier above 72.5°C */
-        if (g->T[0] > 72.5f && starch_shield < 0.08f && sim->emulsifier_units > 0.1f) {
-            stab *= clampf(1.0f - 0.15f * (g->T[0] - 72.5f), 0.05f, 1.0f);
+        /* Thermal curdling of egg/dairy emulsifier (>72.5°C unshielded, >77.5°C with pasta starch shield) */
+        float t_emul = (g->count == 1) ? g->T[0] : g->T[bot_idx];
+        float t_curdle = 72.5f + 25.0f * fminf(starch_shield, 0.20f);
+        if (t_emul > t_curdle && raw_starch_shield < 0.45f && sim->emulsifier_units > 0.1f && g->count == 1) {
+            stab *= clampf(1.0f - 0.15f * (t_emul - 72.5f), 0.05f, 1.0f);
+        } else if (g->count > 1 && t_emul > t_curdle && sim->emulsifier_units > 2.5f) {
+            stab *= clampf(1.0f - 0.12f * (t_emul - t_curdle), 0.08f, 1.0f);
+        }
+        /* Irreversible egg yolk coagulation: once scrambled, cooling cannot restore lecithin film */
+        if (g->denat_albumen[bot_idx] > 0.65f && raw_starch_shield < 0.25f && sim->emulsifier_units > 0.5f) {
+            stab *= 0.28f;
         }
         /* Acid curdling near casein isoelectric point pH 4.6 without strong lecithin/starch */
         if (sim->metrics.ph > 0.1f && sim->metrics.ph < 4.7f && starch_shield < 0.08f && sim->emulsifier_units < 12.0f) {

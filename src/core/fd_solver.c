@@ -69,7 +69,9 @@ float fd_ingredient_similarity(const fd_ingredient_t *a, const fd_ingredient_t *
 
 static float recipe_total_time(const fd_recipe_t *r) {
     float t = 0.0f;
-    for (int i = 0; i < r->step_count; i++) t += r->steps[i].duration_sec;
+    for (int i = 0; i < r->step_count; i++) {
+        if (!r->steps[i].parallel) t += r->steps[i].duration_sec;
+    }
     return t;
 }
 
@@ -226,14 +228,27 @@ static int pick_by_role(const fd_database_t *db, const fd_constraints_t *c, uint
     return matches[xorshift32(rng) % (uint32_t)n];
 }
 
-static void add_unique_item(fd_recipe_t *r, const char *id, float mass_g) {
+static void add_unique_item_v(fd_recipe_t *r, const char *id, float mass_g, int vessel_idx, const char *prep) {
     if (!id || id[0] == '\0' || r->item_count >= FD_MAX_RECIPE_ITEMS) return;
     for (int i = 0; i < r->item_count; i++) {
         if (strcmp(r->items[i].ingredient_id, id) == 0) return;
     }
-    snprintf(r->items[r->item_count].ingredient_id, sizeof(r->items[0].ingredient_id), "%s", id);
-    r->items[r->item_count].mass_g = mass_g;
-    r->item_count++;
+    fd_recipe_item_t *it = &r->items[r->item_count++];
+    snprintf(it->ingredient_id, sizeof(it->ingredient_id), "%s", id);
+    it->mass_g     = mass_g;
+    it->vessel_idx = vessel_idx;
+    it->add_at_step = 0;
+    snprintf(it->prep_note, sizeof(it->prep_note), "%s", prep ? prep : "");
+}
+
+static int pick_thermal_technique(const fd_database_t *db, uint32_t *rng) {
+    int matches[FD_MAX_TECHNIQUES];
+    int n = 0;
+    for (int i = 0; i < db->technique_count; i++) {
+        if (db->techniques[i].default_temp_c >= 54.0f) matches[n++] = i;
+    }
+    if (n == 0) return 0;
+    return matches[xorshift32(rng) % (uint32_t)n];
 }
 
 static void build_random_blueprint(fd_recipe_t *r, const fd_database_t *db,
@@ -242,52 +257,25 @@ static void build_random_blueprint(fd_recipe_t *r, const fd_database_t *db,
     snprintf(r->id, sizeof(r->id), "invented_%d", idx_num + 1);
     snprintf(r->category, sizeof(r->category), "invented");
 
-    /* 1. Include mandatory user pantry ingredients first */
+    /* 1. Determine primary structural food or emulsion base */
     int main_idx = -1;
     for (int i = 0; i < c->include_count; i++) {
         int id_idx = fd_db_find_ingredient(db, c->include_ids[i]);
         if (id_idx >= 0 && !is_excluded(c, &db->ingredients[id_idx])) {
             uint32_t rf = db->ingredients[id_idx].role_flags;
-            float def_m = (rf & (FD_ROLE_PROTEIN_MAIN | FD_ROLE_VEG_MAIN | FD_ROLE_STARCH_BASE)) ? 180.0f : 22.0f;
-            if (rf & FD_ROLE_SALT) def_m = 2.4f;
-            add_unique_item(r, db->ingredients[id_idx].id, def_m);
             if (main_idx < 0 && (rf & (FD_ROLE_PROTEIN_MAIN | FD_ROLE_VEG_MAIN | FD_ROLE_STARCH_BASE))) {
                 main_idx = id_idx;
             }
         }
     }
-
-    /* 2. Ensure a primary structural food or emulsion base exists */
     if (main_idx < 0) {
         uint32_t main_roles = c->require_emulsion
             ? (FD_ROLE_LIQUID_BASE | FD_ROLE_EMULSIFIER)
             : (FD_ROLE_PROTEIN_MAIN | FD_ROLE_VEG_MAIN | FD_ROLE_STARCH_BASE);
         main_idx = pick_by_role(db, c, main_roles, rng);
         if (main_idx < 0) main_idx = pick_by_role(db, c, 0xFFFFFFFFu, rng);
-        if (main_idx >= 0) add_unique_item(r, db->ingredients[main_idx].id, c->require_emulsion ? 60.0f : 190.0f);
     }
 
-    /* 3. Add fat/cooking medium, salt, and flavor enhancers (umami/acid/emulsifier/aromatic) */
-    int fat_idx = pick_by_role(db, c, FD_ROLE_FAT_MEDIUM, rng);
-    if (fat_idx >= 0) add_unique_item(r, db->ingredients[fat_idx].id, c->require_emulsion ? 95.0f : 18.0f);
-
-    if (c->require_emulsion) {
-        int em_idx = pick_by_role(db, c, FD_ROLE_EMULSIFIER, rng);
-        if (em_idx >= 0) add_unique_item(r, db->ingredients[em_idx].id, 28.0f);
-        int liq_idx = pick_by_role(db, c, FD_ROLE_LIQUID_BASE | FD_ROLE_ACID, rng);
-        if (liq_idx >= 0) add_unique_item(r, db->ingredients[liq_idx].id, 35.0f);
-    }
-
-    int salt_idx = pick_by_role(db, c, FD_ROLE_SALT, rng);
-    if (salt_idx >= 0) add_unique_item(r, db->ingredients[salt_idx].id, 2.2f);
-
-    uint32_t accent_role = FD_ROLE_AROMATIC | FD_ROLE_UMAMI;
-    if (c->target_sour > 3.0f || c->max_gi > 0.0f) accent_role |= FD_ROLE_ACID;
-    if (c->target_sweet > 4.0f) accent_role |= FD_ROLE_SWEETENER;
-    int acc_idx = pick_by_role(db, c, accent_role, rng);
-    if (acc_idx >= 0) add_unique_item(r, db->ingredients[acc_idx].id, 16.0f);
-
-    /* 4. Geometry & 1-2 stage cooking technique schedule */
     if (c->require_emulsion) {
         r->shape = FD_SHAPE_LIQUID;
         r->lx_mm = 80.0f; r->ly_mm = 80.0f; r->lz_mm = 40.0f;
@@ -302,53 +290,178 @@ static void build_random_blueprint(fd_recipe_t *r, const fd_database_t *db,
         r->lx_mm = 90.0f; r->ly_mm = 70.0f; r->lz_mm = 24.0f;
     }
 
-    float max_t = (c->max_time_sec > 60.0f) ? c->max_time_sec : 1500.0f;
-    if (c->require_emulsion && fd_db_find_technique(db, "whisk_emulsify") >= 0) {
-        r->step_count = 1;
-        snprintf(r->steps[0].technique_id, sizeof(r->steps[0].technique_id), "whisk_emulsify");
-        r->steps[0].temp_c       = 58.0f + 10.0f * rand01(rng);
-        r->steps[0].duration_sec = 180.0f + 120.0f * rand01(rng);
-    } else if (db->technique_count > 0) {
-        bool two_step = (max_t >= 480.0f) && (rand01(rng) > 0.35f);
-        r->step_count = two_step ? 2 : 1;
-        for (int s = 0; s < r->step_count; s++) {
-            int ti = (int)(xorshift32(rng) % (uint32_t)db->technique_count);
-            /* Prefer high-heat sear on final step if crispness desired */
-            if (s == r->step_count - 1 && c->target_crispness > 5.0f && fd_db_find_technique(db, "pan_sear") >= 0) {
+    float max_t = (c->max_time_sec > 90.0f) ? c->max_time_sec : 1500.0f;
+    int fat_idx  = pick_by_role(db, c, FD_ROLE_FAT_MEDIUM, rng);
+    int salt_idx = pick_by_role(db, c, FD_ROLE_SALT, rng);
+    uint32_t accent_role = FD_ROLE_AROMATIC | FD_ROLE_UMAMI;
+    if (c->target_sour > 3.0f || c->max_gi > 0.0f) accent_role |= FD_ROLE_ACID;
+    if (c->target_sweet > 4.0f) accent_role |= FD_ROLE_SWEETENER;
+    int acc_idx = pick_by_role(db, c, accent_role, rng);
+
+    if (c->require_emulsion) {
+        /* 2-Vessel Emulsion Workflow: Whisking Bowl + Warm/Drizzle Fat Vessel */
+        r->vessel_count = 2;
+        snprintf(r->vessels[0].id, sizeof(r->vessels[0].id), "bowl");
+        snprintf(r->vessels[0].name, sizeof(r->vessels[0].name), "Whisking Bowl");
+        r->vessels[0].kind = FD_VESSEL_BOWL; r->vessels[0].shape = FD_SHAPE_LIQUID;
+        r->vessels[0].lx_mm = 80.0f; r->vessels[0].ly_mm = 80.0f; r->vessels[0].lz_mm = 40.0f; r->vessels[0].init_temp_c = 20.0f;
+
+        snprintf(r->vessels[1].id, sizeof(r->vessels[1].id), "fat_pan");
+        snprintf(r->vessels[1].name, sizeof(r->vessels[1].name), "Lipid Drizzle Pan");
+        r->vessels[1].kind = FD_VESSEL_POT; r->vessels[1].shape = FD_SHAPE_LIQUID;
+        r->vessels[1].lx_mm = 65.0f; r->vessels[1].ly_mm = 65.0f; r->vessels[1].lz_mm = 25.0f; r->vessels[1].init_temp_c = 20.0f;
+
+        if (main_idx >= 0) add_unique_item_v(r, db->ingredients[main_idx].id, 55.0f, 0, "aqueous base");
+        int em_idx  = pick_by_role(db, c, FD_ROLE_EMULSIFIER, rng);
+        int liq_idx = pick_by_role(db, c, FD_ROLE_LIQUID_BASE | FD_ROLE_ACID, rng);
+        if (em_idx >= 0)  add_unique_item_v(r, db->ingredients[em_idx].id, 28.0f, 0, "surfactant");
+        if (liq_idx >= 0) add_unique_item_v(r, db->ingredients[liq_idx].id, 35.0f, 0, "acid/water phase");
+        if (salt_idx >= 0)add_unique_item_v(r, db->ingredients[salt_idx].id, 2.0f, 0, "dissolved");
+        if (acc_idx >= 0) add_unique_item_v(r, db->ingredients[acc_idx].id, 14.0f, 0, "finely minced");
+        if (fat_idx >= 0) add_unique_item_v(r, db->ingredients[fat_idx].id, 95.0f, 1, "slow thin stream");
+
+        for (int i = 0; i < c->include_count; i++) {
+            int id_idx = fd_db_find_ingredient(db, c->include_ids[i]);
+            if (id_idx >= 0 && !is_excluded(c, &db->ingredients[id_idx])) {
+                add_unique_item_v(r, db->ingredients[id_idx].id, 24.0f, 0, "pantry inclusion");
+            }
+        }
+
+        float t_em = 58.0f + 9.0f * rand01(rng);
+        r->step_count = 3;
+        r->steps[0] = (fd_recipe_step_t){ .action = FD_ACT_WHISK, .vessel_idx = 0, .target_vessel_idx = -1,
+            .technique_id = "whisk_emulsify", .temp_c = t_em, .duration_sec = 75.0f, .agitation = 0.85f };
+        r->steps[1] = (fd_recipe_step_t){ .action = FD_ACT_COOK, .vessel_idx = 1, .target_vessel_idx = -1,
+            .technique_id = "simmer_poach", .temp_c = t_em, .duration_sec = 75.0f, .parallel = true };
+        r->steps[2] = (fd_recipe_step_t){ .action = FD_ACT_COMBINE, .vessel_idx = 1, .target_vessel_idx = 0,
+            .technique_id = "whisk_emulsify", .temp_c = t_em, .duration_sec = 160.0f + 90.0f * rand01(rng), .agitation = 0.92f };
+    } else {
+        /* 3-Station Culinary Workflow: Prep Board -> Primary Skillet/Pot + Parallel Pan Glaze -> Combine & Rest */
+        r->vessel_count = 3;
+        snprintf(r->vessels[0].id, sizeof(r->vessels[0].id), "prep");
+        snprintf(r->vessels[0].name, sizeof(r->vessels[0].name), "Prep Board");
+        r->vessels[0].kind = FD_VESSEL_BOARD; r->vessels[0].shape = r->shape;
+        r->vessels[0].lx_mm = r->lx_mm; r->vessels[0].ly_mm = r->ly_mm; r->vessels[0].lz_mm = r->lz_mm; r->vessels[0].init_temp_c = 20.0f;
+
+        snprintf(r->vessels[1].id, sizeof(r->vessels[1].id), "cook");
+        snprintf(r->vessels[1].name, sizeof(r->vessels[1].name), "Primary Skillet / Pot");
+        r->vessels[1].kind = FD_VESSEL_SKILLET; r->vessels[1].shape = r->shape;
+        r->vessels[1].lx_mm = r->lx_mm; r->vessels[1].ly_mm = r->ly_mm; r->vessels[1].lz_mm = r->lz_mm; r->vessels[1].init_temp_c = 20.0f;
+
+        snprintf(r->vessels[2].id, sizeof(r->vessels[2].id), "sauce");
+        snprintf(r->vessels[2].name, sizeof(r->vessels[2].name), "Aromatic Saucepan");
+        r->vessels[2].kind = FD_VESSEL_POT; r->vessels[2].shape = FD_SHAPE_LIQUID;
+        r->vessels[2].lx_mm = 70.0f; r->vessels[2].ly_mm = 70.0f; r->vessels[2].lz_mm = 22.0f; r->vessels[2].init_temp_c = 20.0f;
+
+        if (main_idx >= 0) add_unique_item_v(r, db->ingredients[main_idx].id, 195.0f, 0, "trimmed primary cut");
+        if (salt_idx >= 0) add_unique_item_v(r, db->ingredients[salt_idx].id, 2.3f,   0, "dry-brine seasoning");
+        if (fat_idx >= 0)  add_unique_item_v(r, db->ingredients[fat_idx].id,  16.0f,  1, "cooking medium");
+        if (acc_idx >= 0)  add_unique_item_v(r, db->ingredients[acc_idx].id,  18.0f,  2, "aromatic reduction");
+        int liq_idx = pick_by_role(db, c, FD_ROLE_LIQUID_BASE | FD_ROLE_ACID, rng);
+        if (liq_idx >= 0)  add_unique_item_v(r, db->ingredients[liq_idx].id,  28.0f,  2, "deglazing liquid");
+
+        for (int i = 0; i < c->include_count; i++) {
+            int id_idx = fd_db_find_ingredient(db, c->include_ids[i]);
+            if (id_idx >= 0 && !is_excluded(c, &db->ingredients[id_idx])) {
+                uint32_t rf = db->ingredients[id_idx].role_flags;
+                float def_m = (rf & (FD_ROLE_PROTEIN_MAIN | FD_ROLE_VEG_MAIN | FD_ROLE_STARCH_BASE)) ? 185.0f : 20.0f;
+                if (rf & FD_ROLE_SALT) def_m = 2.4f;
+                int v_t = (rf & (FD_ROLE_PROTEIN_MAIN | FD_ROLE_VEG_MAIN | FD_ROLE_STARCH_BASE)) ? 0 : 2;
+                add_unique_item_v(r, db->ingredients[id_idx].id, def_m, v_t, "pantry inclusion");
+            }
+        }
+
+        int s = 0;
+        /* Step 1: Prep Board sizing / dry-brine */
+        r->steps[s++] = (fd_recipe_step_t){
+            .action = (r->shape == FD_SHAPE_LIQUID) ? FD_ACT_SALT_BRINE : FD_ACT_CUT_PREP,
+            .vessel_idx = 0, .target_vessel_idx = -1, .technique_id = "knife_prep",
+            .temp_c = 20.0f, .duration_sec = 30.0f,
+            .cut_lx_mm = r->lx_mm, .cut_ly_mm = r->ly_mm, .cut_lz_mm = r->lz_mm,
+            .cut_shape = r->shape, .has_cut_shape = true
+        };
+        /* Step 2: Transfer from Prep Board into Primary Skillet / Pot */
+        r->steps[s++] = (fd_recipe_step_t){
+            .action = FD_ACT_COMBINE, .vessel_idx = 0, .target_vessel_idx = 1,
+            .technique_id = "pan_sear", .temp_c = 22.0f, .duration_sec = 5.0f, .agitation = 0.30f
+        };
+
+        /* Step 3..4: 1 or 2 thermal cooking stages on Vessel 1 */
+        bool two_cook = (max_t >= 540.0f) && (rand01(rng) > 0.35f);
+        int n_cook = two_cook ? 2 : 1;
+        float cook_budget = fmaxf(120.0f, max_t - 95.0f);
+        for (int k = 0; k < n_cook; k++) {
+            int ti = pick_thermal_technique(db, rng);
+            if (k == n_cook - 1 && c->target_crispness > 5.0f && fd_db_find_technique(db, "pan_sear") >= 0) {
                 ti = fd_db_find_technique(db, "pan_sear");
-            } else if (s == 0 && two_step && fd_db_find_technique(db, "sous_vide") >= 0 && max_t >= 900.0f) {
+            } else if (k == 0 && two_cook && fd_db_find_technique(db, "sous_vide") >= 0 && max_t >= 900.0f) {
                 ti = fd_db_find_technique(db, "sous_vide");
             }
             const fd_technique_t *tc = &db->techniques[ti];
-            snprintf(r->steps[s].technique_id, sizeof(r->steps[s].technique_id), "%s", tc->id);
-            r->steps[s].temp_c       = clampf(tc->default_temp_c + (rand01(rng) - 0.5f) * 28.0f, tc->min_temp_c, tc->max_temp_c);
-            r->steps[s].duration_sec = clampf((0.25f + 0.45f * rand01(rng)) * (max_t / (float)r->step_count), 60.0f, max_t * 0.7f);
-            r->steps[s].flip_midway  = (r->shape != FD_SHAPE_LIQUID);
-            r->steps[s].lid_closed   = (s == 0 && two_step);
+            fd_recipe_step_t st = { 0 };
+            st.action = FD_ACT_COOK;
+            st.vessel_idx = 1;
+            st.target_vessel_idx = -1;
+            snprintf(st.technique_id, sizeof(st.technique_id), "%s", tc->id);
+            st.temp_c = clampf(tc->default_temp_c + (rand01(rng) - 0.5f) * 26.0f, tc->min_temp_c, tc->max_temp_c);
+            st.duration_sec = clampf((0.30f + 0.45f * rand01(rng)) * (cook_budget / (float)n_cook), 60.0f, cook_budget * 0.72f);
+            st.flip_midway = (r->shape != FD_SHAPE_LIQUID);
+            st.lid_closed = (k == 0 && two_cook);
+            r->steps[s++] = st;
         }
+
+        /* Step 5: Parallel aromatic reduction in Saucepan + Combine & brief carryover Rest */
+        if (acc_idx >= 0 || liq_idx >= 0) {
+            fd_recipe_step_t s_red = {
+                .action = FD_ACT_COOK, .vessel_idx = 2, .target_vessel_idx = -1,
+                .temp_c = 92.0f, .duration_sec = 90.0f, .parallel = true
+            };
+            snprintf(s_red.technique_id, sizeof(s_red.technique_id), "%s",
+                     (fd_db_find_technique(db, "deglaze_reduce") >= 0) ? "deglaze_reduce" : "simmer_poach");
+            r->steps[s++] = s_red;
+            r->steps[s++] = (fd_recipe_step_t){
+                .action = FD_ACT_COMBINE, .vessel_idx = 2, .target_vessel_idx = 1,
+                .technique_id = "simmer_poach", .temp_c = 68.0f, .duration_sec = 10.0f, .agitation = 0.35f
+            };
+        }
+        fd_recipe_step_t s_rest = {
+            .action = FD_ACT_REST, .vessel_idx = 1, .target_vessel_idx = -1,
+            .temp_c = 28.0f, .duration_sec = 45.0f
+        };
+        snprintf(s_rest.technique_id, sizeof(s_rest.technique_id), "%s",
+                 (fd_db_find_technique(db, "rest_hold") >= 0) ? "rest_hold" : "ferment_proof");
+        r->steps[s++] = s_rest;
+        r->step_count = s;
     }
 
     const char *mname = (main_idx >= 0) ? db->ingredients[main_idx].name : "Culinary Creation";
     const char *aname = (acc_idx >= 0)  ? db->ingredients[acc_idx].name  : "Artisanal";
     snprintf(r->name, sizeof(r->name), "Invented %.26s & %.26s", mname, aname);
-    snprintf(r->notes, sizeof(r->notes), "Synthesized from 3D first-principles evolutionary search.");
+    snprintf(r->notes, sizeof(r->notes), "Multi-station workflow synthesized via 3D first-principles evolution.");
 }
 
 static void mutate_recipe(fd_recipe_t *r, const fd_database_t *db, const fd_constraints_t *c, uint32_t *rng) {
-    /* Perturb masses */
     for (int i = 0; i < r->item_count; i++) {
         if (rand01(rng) < 0.65f) {
             float scale = 0.78f + 0.44f * rand01(rng);
             r->items[i].mass_g = clampf(r->items[i].mass_g * scale, 0.8f, 450.0f);
         }
     }
-    /* Perturb 3D cut thickness lz_mm */
     if (r->shape != FD_SHAPE_LIQUID && rand01(rng) < 0.45f) {
         r->lz_mm = clampf(r->lz_mm * (0.82f + 0.36f * rand01(rng)), 8.0f, 65.0f);
+        for (int v = 0; v < r->vessel_count; v++) {
+            if (r->vessels[v].shape != FD_SHAPE_LIQUID) r->vessels[v].lz_mm = r->lz_mm;
+        }
+        for (int s = 0; s < r->step_count; s++) {
+            if (r->steps[s].action == FD_ACT_CUT_PREP) r->steps[s].cut_lz_mm = r->lz_mm;
+        }
     }
-    /* Perturb cooking step temperatures & durations */
-    float max_t = (c->max_time_sec > 60.0f) ? c->max_time_sec : 1800.0f;
+    float max_t = (c->max_time_sec > 90.0f) ? c->max_time_sec : 1800.0f;
     for (int s = 0; s < r->step_count; s++) {
+        fd_step_action_t act = r->steps[s].action;
+        if (act != FD_ACT_COOK && act != FD_ACT_WHISK && !(act == FD_ACT_COMBINE && r->steps[s].duration_sec > 30.0f)) {
+            continue;
+        }
         int ti = fd_db_find_technique(db, r->steps[s].technique_id);
         float lo = (ti >= 0) ? db->techniques[ti].min_temp_c : 40.0f;
         float hi = (ti >= 0) ? db->techniques[ti].max_temp_c : 240.0f;
@@ -357,7 +470,7 @@ static void mutate_recipe(fd_recipe_t *r, const fd_database_t *db, const fd_cons
         }
         if (rand01(rng) < 0.75f) {
             r->steps[s].duration_sec = clampf(r->steps[s].duration_sec * (0.72f + 0.56f * rand01(rng)),
-                                              35.0f, max_t / (float)r->step_count);
+                                              35.0f, max_t * 0.65f);
         }
     }
 }

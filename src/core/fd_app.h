@@ -31,7 +31,7 @@ typedef struct {
     fd_database_t  db;
     fd_lua_t       lua;
     fd_i18n_t      i18n;
-    fd_sim_state_t sim;
+    fd_kitchen_t   kitchen;
     fd_ui_t        ui;
 
     /* Active UI & touch state */
@@ -42,12 +42,13 @@ typedef struct {
     bool             paused;
     float            time_scale;    /* 1x .. 120x */
 
-    /* Onboarding Tutorial & Online Help state */
+    /* Onboarding Tutorial, Chef Recipe Card & Online Help state */
     bool             show_welcome;
     bool             tutorial_open;
     int              tutorial_step; /* 0 .. FD_TUTORIAL_STEPS-1 */
     bool             help_open;
     int              help_tab;      /* 0 .. FD_HELP_TABS-1 */
+    bool             recipe_card_open;
     bool             lang_changed;
     int              pending_lang_idx; /* -1 when none; applied safely after fd_ui_end */
     bool             pending_reload;
@@ -76,6 +77,18 @@ typedef struct {
     fd_sound_cue_t   pending_cue;
 } fd_app_t;
 
+static inline fd_sim_state_t *fd_app_vessel(fd_app_t *app) {
+    int v = (app->kitchen.active_vessel >= 0 && app->kitchen.active_vessel < FD_MAX_VESSELS)
+          ? app->kitchen.active_vessel : 0;
+    return &app->kitchen.vessels[v];
+}
+
+static inline const fd_sim_state_t *fd_app_vessel_const(const fd_app_t *app) {
+    int v = (app->kitchen.active_vessel >= 0 && app->kitchen.active_vessel < FD_MAX_VESSELS)
+          ? app->kitchen.active_vessel : 0;
+    return &app->kitchen.vessels[v];
+}
+
 bool fd_app_init(fd_app_t *app, const char *explicit_assets_dir, const char *exe_base_path);
 bool fd_app_init_with_lang(fd_app_t *app, const char *explicit_assets_dir,
                            const char *exe_base_path, const char *lang_code);
@@ -87,8 +100,12 @@ void fd_app_start_tutorial(fd_app_t *app);
 void fd_app_tutorial_try_step(fd_app_t *app, int step);
 void fd_app_open_help(fd_app_t *app, int tab);
 
+/* Multi-vessel recipe & live mechanical/thermal action controls */
 bool fd_app_load_recipe_index(fd_app_t *app, int recipe_idx);
 bool fd_app_load_recipe(fd_app_t *app, const fd_recipe_t *r);
+bool fd_app_select_vessel(fd_app_t *app, int vessel_idx);
+bool fd_app_step_recipe_next(fd_app_t *app);
+bool fd_app_trigger_action(fd_app_t *app, fd_step_action_t action);
 void fd_app_snap_cold_spot(fd_app_t *app);
 void fd_app_snap_hot_spot(fd_app_t *app);
 

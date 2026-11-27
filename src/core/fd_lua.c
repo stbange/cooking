@@ -305,6 +305,46 @@ static int l_add_technique(lua_State *L) {
     return 0;
 }
 
+static fd_vessel_kind_t parse_vessel_kind(const char *s) {
+    if (!s) return FD_VESSEL_SKILLET;
+    if (strcmp(s, "board") == 0)   return FD_VESSEL_BOARD;
+    if (strcmp(s, "bowl") == 0)    return FD_VESSEL_BOWL;
+    if (strcmp(s, "pot") == 0)     return FD_VESSEL_POT;
+    if (strcmp(s, "oven") == 0)    return FD_VESSEL_OVEN;
+    if (strcmp(s, "plate") == 0)   return FD_VESSEL_PLATE;
+    return FD_VESSEL_SKILLET;
+}
+
+static fd_step_action_t parse_step_action(const char *s) {
+    if (!s) return FD_ACT_COOK;
+    if (strcmp(s, "cut") == 0 || strcmp(s, "prep") == 0)     return FD_ACT_CUT_PREP;
+    if (strcmp(s, "pound") == 0)                             return FD_ACT_POUND;
+    if (strcmp(s, "salt_brine") == 0 || strcmp(s, "brine") == 0) return FD_ACT_SALT_BRINE;
+    if (strcmp(s, "whisk") == 0 || strcmp(s, "whip") == 0)   return FD_ACT_WHISK;
+    if (strcmp(s, "knead") == 0)                             return FD_ACT_KNEAD;
+    if (strcmp(s, "fold") == 0 || strcmp(s, "stir") == 0)    return FD_ACT_FOLD_STIR;
+    if (strcmp(s, "deglaze") == 0)                           return FD_ACT_DEGLAZE;
+    if (strcmp(s, "combine") == 0 || strcmp(s, "transfer") == 0) return FD_ACT_COMBINE;
+    if (strcmp(s, "rest") == 0)                              return FD_ACT_REST;
+    return FD_ACT_COOK;
+}
+
+static int resolve_vessel_ref(lua_State *L, int tbl_idx, const char *key, const fd_recipe_t *r, int def_idx) {
+    lua_getfield(L, tbl_idx, key);
+    int out = def_idx;
+    if (lua_type(L, -1) == LUA_TNUMBER) {
+        int v = (int)lua_tointeger(L, -1) - 1;
+        if (v >= 0 && v < r->vessel_count) out = v;
+    } else if (lua_type(L, -1) == LUA_TSTRING) {
+        const char *vid = lua_tostring(L, -1);
+        for (int i = 0; i < r->vessel_count; i++) {
+            if (strcmp(r->vessels[i].id, vid) == 0) { out = i; break; }
+        }
+    }
+    lua_pop(L, 1);
+    return out;
+}
+
 static int l_add_recipe(lua_State *L) {
     luaL_checktype(L, 1, LUA_TTABLE);
     fd_lua_t *h = get_host(L);
@@ -323,6 +363,44 @@ static int l_add_recipe(lua_State *L) {
     r.lz_mm = tbl_float(L, 1, "lz_mm", 28.0f);
     r.chill_after = tbl_bool(L, 1, "chill_after", false);
 
+    lua_getfield(L, 1, "vessels");
+    if (lua_istable(L, -1)) {
+        int nv = (int)luaL_len(L, -1);
+        for (int i = 1; i <= nv && r.vessel_count < FD_MAX_VESSELS; i++) {
+            lua_rawgeti(L, -1, i);
+            if (lua_istable(L, -1)) {
+                fd_vessel_spec_t *vs = &r.vessels[r.vessel_count++];
+                char def_id[16], kbuf[24], vsbuf[24];
+                snprintf(def_id, sizeof(def_id), "v%d", r.vessel_count);
+                tbl_str(L, -1, "id", vs->id, sizeof(vs->id), def_id);
+                tbl_str(L, -1, "name", vs->name, sizeof(vs->name), vs->id);
+                tbl_str(L, -1, "kind", kbuf, sizeof(kbuf), "skillet");
+                vs->kind = parse_vessel_kind(kbuf);
+                tbl_str(L, -1, "shape", vsbuf, sizeof(vsbuf), sbuf);
+                vs->shape = parse_shape(vsbuf);
+                vs->lx_mm = tbl_float(L, -1, "lx_mm", r.lx_mm);
+                vs->ly_mm = tbl_float(L, -1, "ly_mm", r.ly_mm);
+                vs->lz_mm = tbl_float(L, -1, "lz_mm", r.lz_mm);
+                vs->init_temp_c = tbl_float(L, -1, "init_temp_c", 20.0f);
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    if (r.vessel_count == 0) {
+        r.vessel_count = 1;
+        snprintf(r.vessels[0].id, sizeof(r.vessels[0].id), "main");
+        snprintf(r.vessels[0].name, sizeof(r.vessels[0].name),
+                 (r.shape == FD_SHAPE_LIQUID) ? "Saucepan / Bowl" : "Primary Cooking Vessel");
+        r.vessels[0].kind        = (r.shape == FD_SHAPE_LIQUID) ? FD_VESSEL_POT : FD_VESSEL_SKILLET;
+        r.vessels[0].shape       = r.shape;
+        r.vessels[0].lx_mm       = r.lx_mm;
+        r.vessels[0].ly_mm       = r.ly_mm;
+        r.vessels[0].lz_mm       = r.lz_mm;
+        r.vessels[0].init_temp_c = 20.0f;
+    }
+
     lua_getfield(L, 1, "items");
     if (lua_istable(L, -1)) {
         int n = (int)luaL_len(L, -1);
@@ -331,7 +409,11 @@ static int l_add_recipe(lua_State *L) {
             if (lua_istable(L, -1)) {
                 fd_recipe_item_t *it = &r.items[r.item_count++];
                 tbl_str(L, -1, "id", it->ingredient_id, sizeof(it->ingredient_id), "");
-                it->mass_g = tbl_float(L, -1, "mass_g", 50.0f);
+                it->mass_g     = tbl_float(L, -1, "mass_g", 50.0f);
+                it->vessel_idx = resolve_vessel_ref(L, -1, "vessel", &r, 0);
+                int step1      = (int)tbl_float(L, -1, "add_step", 1.0f);
+                it->add_at_step = (step1 > 1) ? (step1 - 1) : 0;
+                tbl_str(L, -1, "prep", it->prep_note, sizeof(it->prep_note), "");
             }
             lua_pop(L, 1);
         }
@@ -345,11 +427,30 @@ static int l_add_recipe(lua_State *L) {
             lua_rawgeti(L, -1, i);
             if (lua_istable(L, -1)) {
                 fd_recipe_step_t *st = &r.steps[r.step_count++];
-                tbl_str(L, -1, "technique", st->technique_id, sizeof(st->technique_id), "pan_sear");
-                st->temp_c       = tbl_float(L, -1, "temp_c", 180.0f);
-                st->duration_sec = tbl_float(L, -1, "duration_sec", 120.0f);
+                char abuf[24], csbuf[24];
+                tbl_str(L, -1, "action", abuf, sizeof(abuf), "cook");
+                st->action            = parse_step_action(abuf);
+                st->vessel_idx        = resolve_vessel_ref(L, -1, "vessel", &r, 0);
+                st->target_vessel_idx = resolve_vessel_ref(L, -1, "target_vessel", &r, -1);
+                tbl_str(L, -1, "technique", st->technique_id, sizeof(st->technique_id),
+                        (st->action == FD_ACT_COOK) ? "pan_sear" : "");
+                st->temp_c       = tbl_float(L, -1, "temp_c", (st->action == FD_ACT_COOK) ? 180.0f : 22.0f);
+                st->duration_sec = tbl_float(L, -1, "duration_sec", (st->action == FD_ACT_COOK) ? 120.0f : 45.0f);
                 st->flip_midway  = tbl_bool(L, -1, "flip_midway", false);
                 st->lid_closed   = tbl_bool(L, -1, "lid_closed", false);
+                float def_ag     = (strcmp(abuf, "fold") == 0) ? 0.25f : 0.75f;
+                st->agitation    = tbl_float(L, -1, "agitation", def_ag);
+                st->cut_lx_mm    = tbl_float(L, -1, "cut_lx_mm", 0.0f);
+                st->cut_ly_mm    = tbl_float(L, -1, "cut_ly_mm", 0.0f);
+                st->cut_lz_mm    = tbl_float(L, -1, "cut_lz_mm", 0.0f);
+                tbl_str(L, -1, "cut_shape", csbuf, sizeof(csbuf), "");
+                if (csbuf[0] != '\0') {
+                    st->cut_shape     = parse_shape(csbuf);
+                    st->has_cut_shape = true;
+                }
+                st->parallel = tbl_bool(L, -1, "parallel", false);
+                tbl_str(L, -1, "instruction", st->instruction, sizeof(st->instruction), "");
+                tbl_str(L, -1, "why", st->cue_why, sizeof(st->cue_why), "");
             }
             lua_pop(L, 1);
         }

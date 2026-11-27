@@ -70,11 +70,12 @@ void fd_biology_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_sec)
                         cx = x; cy = y; cz = z;
                     }
 
-                    /* Yeast fermentation CO2 porosity & oven-spring gas expansion */
+                    /* Yeast fermentation CO2 porosity & oven-spring gas expansion (scaled by gluten network) */
+                    float gluten_ret = 0.48f + 0.52f * sim->gluten_network;
                     if (dt_sec > 0.0f && sim->yeast_viability > 0.02f) {
                         float y_act = fd_cardinal_temp_activity(Tc, 4.0f, 32.0f, 49.0f) * sim->yeast_viability;
                         if (y_act > 0.0f && x_sug + sim->dry_starch_g * w_inv > 0.02f) {
-                            g->porosity[i] = clampf(g->porosity[i] + 0.00018f * y_act * dt_sec, 0.0f, 0.72f);
+                            g->porosity[i] = clampf(g->porosity[i] + 0.00022f * gluten_ret * y_act * dt_sec, 0.0f, 0.74f);
                         }
                         if (Tc > 54.0f) {
                             sim->yeast_viability *= expf(-0.08f * dt_sec);
@@ -82,7 +83,7 @@ void fd_biology_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_sec)
                     }
                     /* Thermal leavening / steam oven-spring before gluten/albumen sets */
                     if (dt_sec > 0.0f && g->porosity[i] > 0.05f && Tc > 55.0f && Tc < 88.0f && g->denat_albumen[i] < 0.7f) {
-                        g->porosity[i] = clampf(g->porosity[i] + 0.0008f * dt_sec, 0.0f, 0.76f);
+                        g->porosity[i] = clampf(g->porosity[i] + 0.00095f * gluten_ret * dt_sec, 0.0f, 0.78f);
                     }
 
                     sum_w    += g->W[i];
@@ -144,7 +145,8 @@ void fd_biology_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_sec)
 
     m->avg_moisture        = sum_w * inv_bio;
     m->surface_aw          = (surf_cnt > 0) ? (surf_aw_sum * inv_surf) : 0.95f;
-    m->crust_maillard      = (surf_cnt > 0) ? (surf_mail_sum * inv_surf) : (sum_mail * inv_bio);
+    m->crust_maillard      = fmaxf((surf_cnt > 0) ? (surf_mail_sum * inv_surf) : (sum_mail * inv_bio),
+                                   0.45f * sim->fond_maillard);
     m->crust_caramel       = sum_cara * inv_bio;
     m->max_char            = max_char;
     m->core_myosin_denat   = g->denat_myosin[center_idx];
@@ -175,17 +177,20 @@ void fd_biology_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_sec)
     float raw_bitter = sim->bitter_pool * 4.0f + 9.5f * m->max_char + (m->oil_smoked ? 3.5f : 0.0f);
     m->bitter   = clampf(raw_bitter * (1.0f - 0.05f * m->salty), 0.0f, 10.0f);
     m->umami    = clampf(10.0f * log1pf(umami_eff * 0.025f) / log1pf(25.0f), 0.0f, 10.0f);
-    m->pungency = clampf(sim->pungency_pool * 10.0f, 0.0f, 10.0f);
-    m->aroma    = clampf(sim->aroma_pool * 4.5f + 4.8f * m->crust_maillard + 3.2f * m->crust_caramel, 0.0f, 10.0f);
+    m->pungency = clampf(sim->pungency_pool * (1.0f + 0.30f * sim->cell_rupture) * 10.0f, 0.0f, 10.0f);
+    float aroma_eff = sim->aroma_pool * (1.0f + 0.32f * sim->cell_rupture);
+    m->aroma    = clampf(aroma_eff * 4.5f + 4.8f * m->crust_maillard + 3.2f * m->crust_caramel, 0.0f, 10.0f);
 
     /* 3D Texture Mechanics */
     m->crispness = clampf(10.0f * (1.0f - m->surface_aw / 0.78f) *
                           (0.55f + 0.45f * fmaxf(m->crust_maillard, m->starch_gelatinized)), 0.0f, 10.0f);
     float raw_collagen_pen = (sim->dry_collagen_g * w_inv > 0.02f) ? (4.0f * (1.0f - m->gelatin_converted)) : 0.0f;
-    m->tenderness = clampf(6.8f + 2.5f * (sum_myo * inv_bio) + 2.8f * m->gelatin_converted + 2.0f * m->avg_porosity
+    m->tenderness = clampf(6.8f + 2.5f * (sum_myo * inv_bio) + 2.8f * m->gelatin_converted
+                           + 2.2f * m->avg_porosity + 1.6f * sim->mech_tender
                            - 4.2f * (sum_act * inv_bio) * (sum_act * inv_bio) - raw_collagen_pen, 0.0f, 10.0f);
     float fat_pct = fmaxf(0.0f, sim->total_fat_g + sim->absorbed_oil_g) * inv_100g;
-    m->juiciness  = clampf(9.2f * m->avg_moisture + 0.14f * fat_pct + 2.2f * m->gelatin_converted, 0.0f, 10.0f);
+    m->juiciness  = clampf(9.2f * m->avg_moisture + 0.14f * fat_pct + 2.2f * m->gelatin_converted
+                           + 0.65f * sim->rested_frac, 0.0f, 10.0f);
 
     /* Composite Culinary Harmony Score [0..100] */
     float salt_harmony = (m->sweet > 4.5f) ? 7.5f : (10.0f - 2.2f * fabsf(nacl_pct - 1.05f));

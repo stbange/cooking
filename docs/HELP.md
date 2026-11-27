@@ -8,17 +8,17 @@ Welcome to **FatDuck** — a cross-platform, first-principles 3D cooking simulat
 
 ## 1. Quick Start
 
-1. **Kitchen Lab**:
-   - Pick any dish from the **Dish & Recipe** dropdown (33+ recipes) or browse with `< Prev` / `Next >`.
-   - Switch **Cooking Technique** (Pan Sear, Deep Fry, Convection Bake, Sous-Vide, Boil, Braise, Steam, Emulsify, Ferment, etc.) and adjust **Vessel Temperature (°C)** and **Simulation Speed (`1x`–`120x`)**.
-   - Watch the live **3D Cross-Section Inspector** (`XY Top`, `XZ Side`, `YZ End`), toggle overlays (**Temp**, **Moisture**, **Browning**, **Protein**, **Safety**), and click **Cold Spot** or **Peak Crust** to jump straight to the coldest interior voxel or hottest crust voxel.
-   - Click **Simulate Full Recipe** to run every programmed recipe step to completion.
+1. **Kitchen Lab (Multi-Vessel & Movement Workbench)**:
+   - Pick any dish from the **Dish & Recipe** dropdown (**34+ multi-station recipes**) or click **Chef Card** to open the full human-executable recipe sheet with vessels, mise-en-place gram/`mm` cuts, step-by-step instructions, and scientific cues.
+   - Switch among simultaneous **Active Pots, Bowls & Stations** (`Prep Board`, `Mixing/Whisk Bowl`, `Cast-Iron Skillet`, `Stockpot`, `Oven/Bath`, `Resting Rack`). Every active vessel evolves in parallel!
+   - Trigger live **Thermal & Movement Actions**: adjust **Vessel Temperature (°C)**, toggle **Heat: ON / Off-Heat**, or click **Cut / Dice**, **Whisk / Whip**, **Knead / Fold**, **Flip / Toss 3D**, **Deglaze**, **Rest**, and **Combine ->** (enthalpy-conserving cross-vessel transfer).
+   - Advance one stage at a time with **Step >** or click **Simulate Full Recipe** to run every station through plating.
 2. **Classics (Propose)**:
    - Toggle dietary filters (**Vegan**, **Gluten-Free**, **Dairy-Free**, **Low-GI `<= 52`**) and **Max Cook Time**, then click **Find Verified Classics**.
-   - Incompatible ingredients are replaced automatically using functional chemistry similarity, and every adapted recipe is verified in 3D.
+   - Incompatible ingredients are replaced automatically using functional chemistry similarity, and every adapted multi-vessel recipe is verified in 3D.
 3. **Invent**:
    - Set desired **Target Crispness**, **Target Umami**, **Min Protein (g)**, dietary filters, and **Emulsion** requirement, then click **Invent Recipe**.
-   - FatDuck's offline multi-fidelity evolutionary solver screens candidates on an `8×8×8` coarse grid and verifies top dishes in full 3D.
+   - FatDuck's offline multi-fidelity evolutionary solver synthesizes a complete **multi-station executable workflow** (Prep Board $\to$ Primary Vessel + Saucepan/Whisk Bowl $\to$ Combine & Rest) verified in full 3D.
 4. **Interactive Guided Tour & In-App Help**:
    - Click **Tutorial** in the top bar anytime for the 6-step interactive hands-on walkthrough.
    - Click **Help** (or press `F1`) for the 5-tab in-app reference guide.
@@ -29,8 +29,9 @@ Welcome to **FatDuck** — a cross-platform, first-principles 3D cooking simulat
 
 | Domain | Models Implemented |
 | :--- | :--- |
+| **Multi-Vessel & Movement** | Up to 6 simultaneous stations (`fd_kitchen_t`); knife dicing/mincing (`L²` Fourier path scaling, cellular aroma/amine rupture & un-rested carving purge loss); pounding tenderization; high-shear whisking/whipping (droplet breakup & air foam porosity); dough kneading (`gluten_network` gas retention); gentle folding vs harsh stirring; pan fond deposition & deglazing; enthalpy-conserving vessel transfers ($T_{\text{mix}}$); carryover resting & juice reabsorption. |
 | **3D Geometry** | 9 volumetric cut models (`slab`, `cube`, `cylinder`, `sphere`, `tapered`, `fat_cap`, `bone_in`, `egg`, `liquid`) with 6-face surface masks and 3D flip/toss. |
-| **Physics** | Choi–Okos (1986) temperature-dependent density, specific heat & conductivity; unconditionally stable 3-pass Thomas ADI 3D heat & moisture diffusion; latent ice fusion & boiling desiccation plateau; Lewis psychrometric evaporation; oil uptake/fat rendering; Krieger–Dougherty emulsion rheology. |
+| **Physics** | Choi–Okos (1986) temperature-dependent density, specific heat & conductivity; unconditionally stable 3-pass Thomas ADI 3D heat & moisture diffusion; latent ice fusion & boiling desiccation plateau; Lewis psychrometric evaporation; oil uptake/fat rendering; Krieger–Dougherty emulsion rheology & irreversible thermal yolk curdling. |
 | **Chemistry** | Arrhenius kinetics for Maillard browning (`> 140°C`), caramelization (`> 160°C`), pyrolysis/char, 6-stage protein denaturation & actin syneresis, collagen-to-gelatin hydrolysis (`> 68°C`), starch gelatinization & `4°C` RS3 retrogradation, logarithmic Henderson–Hasselbalch aqueous `pH`, and oil smoke point. |
 | **Biology & Sensory** | 3D cold-spot Bigelow $D/z$ microbial lethality (`SAFE >= 6.5D` or acid safety `pH <= 4.25`), yeast & lactic fermentation, amylase activity, 5-taste + umami synergy, volatile aroma, and 3D crust/core texture scoring. |
 | **Nutrition & Digestion** | Cooked mass-balance energy & macros (`kcal`, protein, fat, net carbs, RS3 resistant starch), Estimated Glycemic Index/Load (`eGI`/`eGL`), and protein bioavailability. |

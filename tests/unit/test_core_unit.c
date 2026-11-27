@@ -131,8 +131,8 @@ static void test_lua_sandbox_and_errors(void) {
     /* Reload full database & test duplicate updates + mod hooks */
     assert(fd_lua_reload_all(&lua));
     assert(db.ingredient_count >= 105);
-    assert(db.technique_count == 15);
-    assert(db.recipe_count >= 32);
+    assert(db.technique_count == 20);
+    assert(db.recipe_count >= 34);
 
     /* Re-register existing id updates in place */
     int prev_cnt = db.ingredient_count;
@@ -421,6 +421,109 @@ static void test_i18n_and_nuklear_ui(void) {
     fd_vfs_free(&vfs);
 }
 
+static void test_multivessel_and_movement_actions(void) {
+    fd_vfs_t vfs; fd_database_t db; fd_lua_t lua;
+    memset(&db, 0, sizeof(db));
+    fd_vfs_init(&vfs, "assets", NULL);
+    assert(fd_lua_init(&lua, &vfs, &db));
+    assert(fd_lua_reload_all(&lua));
+
+    /* 1. Test staged additions, mechanical actions, un-rested hot purge, and step descriptions */
+    fd_sim_state_t v_meat, v_sauce;
+    memset(&v_meat, 0, sizeof(v_meat));
+    memset(&v_sauce, 0, sizeof(v_sauce));
+
+    fd_recipe_item_t steak = { .ingredient_id = "beef_tenderloin", .mass_g = 200.0f };
+    assert(fd_sim_add_item(&v_meat, &db, &steak, FD_SHAPE_SLAB, 90.0f, 70.0f, 28.0f, 20.0f, true));
+    fd_recipe_item_t salt = { .ingredient_id = "sea_salt", .mass_g = 2.4f };
+    assert(fd_sim_add_item(&v_meat, &db, &salt, FD_SHAPE_SLAB, 90.0f, 70.0f, 28.0f, 20.0f, true));
+
+    /* Salt brine, sear both sides hot (>54°C core), then slice un-rested -> verify purge moisture drop */
+    assert(fd_sim_apply_action(&v_meat, &db, &lua, FD_ACT_SALT_BRINE, 0.5f, 0, 0, 0, FD_SHAPE_SLAB, false, 18.0f, 60.0f, true));
+    fd_sim_set_technique(&v_meat, &db, "pan_sear", 220.0f, false);
+    fd_sim_step(&v_meat, &db, &lua, 210.0f);
+    fd_grid_flip_z(&v_meat.grid);
+    fd_sim_step(&v_meat, &db, &lua, 210.0f);
+    assert(v_meat.fond_maillard > 0.01f);
+    float w_before_cut = v_meat.total_water_g;
+    assert(fd_sim_apply_action(&v_meat, &db, &lua, FD_ACT_CUT_PREP, 0.8f, 18.0f, 18.0f, 18.0f, FD_SHAPE_CUBE, true, 22.0f, 30.0f, true));
+    assert(v_meat.total_water_g < w_before_cut);
+    assert(v_meat.cell_rupture > 0.1f);
+
+    /* Pound, deglaze, rest, and combine liquid sauce into solid vessel */
+    assert(fd_sim_apply_action(&v_meat, &db, &lua, FD_ACT_POUND, 0.8f, 0, 0, 8.0f, FD_SHAPE_SLAB, true, 22.0f, 30.0f, true));
+    assert(fd_sim_apply_action(&v_meat, &db, &lua, FD_ACT_DEGLAZE, 0.8f, 0, 0, 0, FD_SHAPE_SLAB, false, 92.0f, 30.0f, true));
+    assert(fd_sim_apply_action(&v_meat, &db, &lua, FD_ACT_REST, 0.5f, 0, 0, 0, FD_SHAPE_SLAB, false, 26.0f, 180.0f, true));
+
+    fd_recipe_item_t yolk = { .ingredient_id = "egg_yolk", .mass_g = 36.0f };
+    assert(fd_sim_add_item(&v_sauce, &db, &yolk, FD_SHAPE_LIQUID, 70.0f, 70.0f, 25.0f, 20.0f, true));
+    assert(fd_sim_apply_action(&v_sauce, &db, &lua, FD_ACT_WHISK, 0.9f, 0, 0, 0, FD_SHAPE_LIQUID, false, 22.0f, 90.0f, true));
+    assert(v_sauce.foam_air > 0.05f);
+    /* Harsh stir knocks down foam */
+    float foam_peak = v_sauce.foam_air;
+    assert(fd_sim_apply_action(&v_sauce, &db, &lua, FD_ACT_FOLD_STIR, 0.85f, 0, 0, 0, FD_SHAPE_LIQUID, false, 22.0f, 30.0f, true));
+    assert(v_sauce.foam_air < foam_peak);
+
+    assert(fd_sim_combine_vessels(&v_sauce, &v_meat, &db, &lua, true, true));
+    assert(v_meat.consumed);
+    assert(v_sauce.grid.count > 1);
+    fd_sim_free(&v_meat);
+    fd_sim_free(&v_sauce);
+
+    /* 2. Test auto-synthesized chef step descriptions across all action types */
+    fd_recipe_t syn;
+    memset(&syn, 0, sizeof(syn));
+    snprintf(syn.id, sizeof(syn.id), "syn_test");
+    snprintf(syn.name, sizeof(syn.name), "Synthetic Multi-Station Test");
+    syn.shape = FD_SHAPE_CUBE; syn.lx_mm = 30.0f; syn.ly_mm = 30.0f; syn.lz_mm = 30.0f;
+    syn.vessel_count = 2;
+    snprintf(syn.vessels[0].id, 24, "v1"); snprintf(syn.vessels[0].name, 48, "Prep Board");
+    snprintf(syn.vessels[1].id, 24, "v2"); snprintf(syn.vessels[1].name, 48, "Skillet");
+    syn.item_count = 2;
+    snprintf(syn.items[0].ingredient_id, 48, "bread_flour"); syn.items[0].mass_g = 120.0f; syn.items[0].vessel_idx = 0;
+    snprintf(syn.items[1].ingredient_id, 48, "water");       syn.items[1].mass_g = 85.0f;  syn.items[1].vessel_idx = 0;
+    fd_step_action_t acts[9] = {
+        FD_ACT_CUT_PREP, FD_ACT_KNEAD, FD_ACT_WHISK, FD_ACT_FOLD_STIR,
+        FD_ACT_DEGLAZE, FD_ACT_COMBINE, FD_ACT_COOK, FD_ACT_COOK, FD_ACT_REST
+    };
+    syn.step_count = 9;
+    for (int s = 0; s < 9; s++) {
+        syn.steps[s].action = acts[s];
+        syn.steps[s].vessel_idx = (s >= 6) ? 1 : 0;
+        syn.steps[s].target_vessel_idx = (acts[s] == FD_ACT_COMBINE) ? 1 : -1;
+        snprintf(syn.steps[s].technique_id, 32, (s == 6) ? "pan_sear" : "simmer_poach");
+        syn.steps[s].temp_c = (s == 6) ? 195.0f : ((s == 7) ? 90.0f : 26.0f);
+        syn.steps[s].duration_sec = 60.0f;
+        char ins[200], why[160];
+        fd_recipe_describe_step(&syn, &db, s, ins, sizeof(ins), why, sizeof(why));
+        assert(strlen(ins) > 10 && strlen(why) > 10);
+    }
+
+    /* Step-by-step live kitchen execution */
+    fd_kitchen_t k;
+    memset(&k, 0, sizeof(k));
+    assert(fd_kitchen_init_recipe(&k, &db, &syn, true));
+    fd_kitchen_step_live(&k, &db, &lua, 5.0f);
+    while (fd_kitchen_exec_next_step(&k, &db, &lua)) {}
+    assert(k.current_step == syn.step_count);
+    fd_kitchen_free(&k);
+
+    /* Also verify Lua numeric vessel index & compact legacy recipe loading */
+    assert(fd_lua_exec_str(&lua, "num_v",
+        "fatduck.add_recipe({ id='mod_compact', name='Compact Mod Dish', shape='cube', lx_mm=25, ly_mm=25, lz_mm=25,"
+        " vessels={{id='b',name='Board',kind='board'},{id='p',name='Pot',kind='pot'}},"
+        " items={{id='yukon_potato',mass_g=150,vessel=1},{id='water',mass_g=100,vessel=2,add_step=2}},"
+        " steps={{vessel=1,action='cut',cut_lx_mm=15,cut_ly_mm=15,cut_lz_mm=15,cut_shape='cube'},"
+        "        {vessel=1,action='combine',target_vessel=2},"
+        "        {vessel=2,technique='simmer_poach',temp_c=92,duration_sec=300}} })",
+        50000));
+    int mc = fd_db_find_recipe(&db, "mod_compact");
+    assert(mc >= 0 && db.recipes[mc].vessel_count == 2);
+
+    fd_lua_free(&lua);
+    fd_vfs_free(&vfs);
+}
+
 int main(void) {
     test_vfs_module();
     test_lua_sandbox_and_errors();
@@ -428,6 +531,7 @@ int main(void) {
     test_physics_chemistry_biology_edge_cases();
     test_solver_propose_and_invent();
     test_i18n_and_nuklear_ui();
+    test_multivessel_and_movement_actions();
     printf("ALL CORE UNIT TESTS PASSED.\n");
     return 0;
 }

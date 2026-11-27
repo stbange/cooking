@@ -34,8 +34,9 @@ test('fetches unbaked Noto fonts & 20 locales over HTTP and runs Nuklear 3D work
   expect(state.lang_count).toBe(20);
   expect(state.vert_count).toBeGreaterThan(100);
   expect(state.ingredients).toBeGreaterThanOrEqual(105);
-  expect(state.techniques).toBe(15);
-  expect(state.recipes).toBeGreaterThanOrEqual(32);
+  expect(state.techniques).toBe(20);
+  expect(state.recipes).toBeGreaterThanOrEqual(34);
+  expect(state.vessels).toBeGreaterThanOrEqual(2);
 
   /* Switch languages dynamically across Latin, CJK, and RTL Arabic */
   await page.evaluate(() => window.fatduckSetLang('de'));

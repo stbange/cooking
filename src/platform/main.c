@@ -145,12 +145,14 @@ EMSCRIPTEN_KEEPALIVE void fd_web_set_lang(const char *code) {
 EMSCRIPTEN_KEEPALIVE const char *fd_web_get_state_json(void) {
     if (!g_host) return "{}";
     const fd_app_t *a = &g_host->app;
+    const fd_sim_state_t *sv = fd_app_vessel_const(a);
     const fd_lang_info_t *li = fd_i18n_lang_info(a->i18n.active_lang);
     snprintf(g_state_json, sizeof(g_state_json),
              "{\"booted\":%s,\"ui\":\"nuklear\",\"touch_mode\":%s,\"tab\":%d,"
-             "\"lang\":\"%s\",\"lang_count\":%d,\"help_open\":%s,"
+             "\"lang\":\"%s\",\"lang_count\":%d,\"help_open\":%s,\"recipe_card_open\":%s,"
              "\"tutorial_open\":%s,\"tutorial_step\":%d,\"vert_count\":%d,"
              "\"ingredients\":%d,\"techniques\":%d,\"recipes\":%d,\"mods\":%d,"
+             "\"vessels\":%d,\"active_vessel\":%d,\"step\":%d,"
              "\"score\":%.2f,\"core_c\":%.2f}",
              g_host->booted ? "true" : "false",
              a->touch_mode ? "true" : "false",
@@ -158,6 +160,7 @@ EMSCRIPTEN_KEEPALIVE const char *fd_web_get_state_json(void) {
              li->code,
              FD_LANG_COUNT,
              a->help_open ? "true" : "false",
+             a->recipe_card_open ? "true" : "false",
              a->tutorial_open ? "true" : "false",
              a->tutorial_step,
              a->ui.vert_count,
@@ -165,8 +168,11 @@ EMSCRIPTEN_KEEPALIVE const char *fd_web_get_state_json(void) {
              a->db.technique_count,
              a->db.recipe_count,
              a->lua.mod_count,
-             a->sim.metrics.overall_score,
-             a->sim.metrics.core_temp_c);
+             a->kitchen.vessel_count,
+             a->kitchen.active_vessel,
+             a->kitchen.current_step,
+             sv->metrics.overall_score,
+             sv->metrics.core_temp_c);
     return g_state_json;
 }
 #endif
@@ -303,6 +309,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *ev) {
             break;
         case SDL_EVENT_KEY_DOWN:
             if (ev->key.key == SDLK_ESCAPE) {
+                if (h->app.recipe_card_open) { h->app.recipe_card_open = false; break; }
                 if (h->app.help_open) { h->app.help_open = false; break; }
                 if (h->app.tutorial_open) { h->app.tutorial_open = false; break; }
                 return SDL_APP_SUCCESS;
@@ -353,7 +360,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
             h->app.pending_url[0] = '\0';
         }
         fd_gl_render(&h->gl, &h->app.ui, pix_w, pix_h);
-        fd_audio_update(&h->audio, h->app.sim.sizzle_flux, h->app.sim.boil_flux, h->app.pending_cue);
+        fd_audio_update(&h->audio, h->app.kitchen.sizzle_flux, h->app.kitchen.boil_flux, h->app.pending_cue);
 
 #ifdef __EMSCRIPTEN__
         if (h->app.lang_changed) {

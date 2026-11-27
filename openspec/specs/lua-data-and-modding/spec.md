@@ -19,3 +19,10 @@ The Lua host SHALL load ingredients, cooking techniques, reaction parameters, an
 #### Scenario: Loading ingredients and mods on hot-reload
 - **WHEN** `fd_lua_reload_all` executes `scripts/init.lua` and `scripts/mods/*.lua`
 - **THEN** all valid ingredient, technique, and recipe entries populate the C registry and any `on_init` mod hook runs
+
+### Requirement: Multi-vessel and movement-action recipe schema
+The Lua `fatduck.add_recipe` registry SHALL accept optional `vessels` station definitions, per-item `vessel`, `add_step`, and `prep` metadata, and step-level `action`, `vessel`, `target_vessel`, `agitation`, `parallel`, `cut_lx_mm`/`cut_ly_mm`/`cut_lz_mm`, `instruction`, and `why` fields while remaining backward-compatible with single-vessel Lua recipes.
+
+#### Scenario: Loading multi-vessel and legacy single-vessel Lua recipes
+- **WHEN** `fd_lua_reload_all` loads recipes with explicit `vessels` alongside compact single-vessel recipes
+- **THEN** multi-vessel recipes populate their station definitions and step actions, and compact recipes default cleanly to a primary vessel

@@ -39,8 +39,9 @@ int main(void) {
     fd_app_t app;
     assert(fd_app_init(&app, "assets", NULL));
     assert(app.db.ingredient_count >= 105);
-    assert(app.db.technique_count == 15);
-    assert(app.db.recipe_count >= 32);
+    assert(app.db.technique_count == 20);
+    assert(app.db.recipe_count >= 34);
+    assert(app.kitchen.vessel_count >= 2);
 
     const float W = 1240.0f, H = 760.0f;
 
@@ -91,9 +92,47 @@ int main(void) {
     assert(app.inventor.done);
     render_frame(&app, W, H, 0.016f, false);
 
-    /* 3. Exercise Kitchen Lab: recipe load, snap cold/hot spots, all 3 planes & 5 overlays */
+    /* 3. Exercise Multi-Vessel Kitchen Lab: vessel switching, Chef Card, live movement actions & stepper */
     app.active_tab = FD_TAB_WORKBENCH;
-    assert(fd_app_load_recipe_index(&app, 1));
+    int carb = fd_db_find_recipe(&app.db, "pasta_carbonara");
+    assert(fd_app_load_recipe_index(&app, carb >= 0 ? carb : 1));
+    assert(app.kitchen.vessel_count == 3);
+    app.recipe_card_open = true;
+    render_frame(&app, W, H, 0.016f, false);
+    app.recipe_card_open = false;
+
+    for (int v = 0; v < app.kitchen.vessel_count; v++) {
+        assert(fd_app_select_vessel(&app, v));
+        render_frame(&app, W, H, 0.016f, false);
+    }
+    assert(fd_app_select_vessel(&app, 0));
+    assert(fd_app_trigger_action(&app, FD_ACT_CUT_PREP));
+    assert(fd_app_trigger_action(&app, FD_ACT_WHISK));
+    assert(fd_app_trigger_action(&app, FD_ACT_FOLD_STIR));
+    assert(fd_app_trigger_action(&app, FD_ACT_DEGLAZE));
+    assert(fd_app_trigger_action(&app, FD_ACT_REST));
+    assert(fd_app_trigger_action(&app, FD_ACT_COMBINE));
+
+    int sour = fd_db_find_recipe(&app.db, "sourdough_boule");
+    if (sour >= 0) {
+        assert(fd_app_load_recipe_index(&app, sour));
+        assert(fd_app_trigger_action(&app, FD_ACT_KNEAD));
+        render_frame(&app, W, H, 0.016f, false);
+    }
+
+    assert(fd_app_load_recipe_index(&app, carb >= 0 ? carb : 1));
+    /* Sweep pointer clicks down Kitchen Lab control & slice buttons */
+    for (float cy = 115.0f; cy <= 560.0f; cy += 32.0f) {
+        click_at(&app, W, H, 85.0f, cy, false);
+        click_at(&app, W, H, 260.0f, cy, false);
+    }
+    app.recipe_card_open = false;
+    app.paused = false;
+
+    assert(fd_app_load_recipe_index(&app, carb >= 0 ? carb : 1));
+    while (fd_app_step_recipe_next(&app)) {
+        render_frame(&app, W, H, 0.016f, false);
+    }
     fd_app_snap_cold_spot(&app);
     fd_app_snap_hot_spot(&app);
     for (int pl = 0; pl < 3; pl++) {

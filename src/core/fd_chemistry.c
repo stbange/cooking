@@ -54,24 +54,33 @@ void fd_chemistry_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_se
     float ph_maillard = clampf(0.35f + 0.30f * (ph - 4.5f), 0.15f, 1.85f);
     float acid_denat_k = (ph < 4.35f) ? (0.0018f * (4.35f - ph)) : 0.0f;
 
-    /* Precursor availability factor for Maillard (amino + reducing sugars/carbs) */
-    float maillard_prec = clampf(0.18f + 2.8f * sim->free_amino_pool * (x_red + 0.12f * x_sta + 0.03f), 0.08f, 1.6f);
+    /* Precursor availability factor for Maillard (amino + reducing sugars/carbs + ruptured cell amines) */
+    float amino_eff = sim->free_amino_pool * (1.0f + 0.32f * sim->cell_rupture);
+    float maillard_prec = clampf(0.18f + 2.8f * amino_eff * (x_red + 0.12f * x_sta + 0.03f), 0.08f, 1.75f);
     float caramel_prec  = clampf(0.12f + 4.5f * x_sug, 0.05f, 1.8f);
+
+    int tidx = (sim->active_tech_idx >= 0 && sim->active_tech_idx < db->technique_count) ? sim->active_tech_idx : -1;
+    bool dry_pan = (tidx < 0) || (db->techniques[tidx].h_bottom >= 180.0f &&
+                                  !db->techniques[tidx].immersed_water && !db->techniques[tidx].immersed_oil);
 
     float max_surf_t = -100.0f;
     for (int i = 0; i < g->count; i++) {
         if (g->tissue[i] == FD_TISSUE_EMPTY || g->tissue[i] == FD_TISSUE_BONE) continue;
         float Tc = g->T[i];
-        if (Tc > max_surf_t) max_surf_t = Tc;
+        /* Robin boundary contact pellicle temperature on hot dry pan face (-Z) */
+        float Tc_crust = (g->count > 1 && dry_pan && (g->surface_mask[i] & FD_FACE_NEG_Z) && sim->ambient_temp_c > Tc)
+                       ? (0.60f * Tc + 0.40f * sim->ambient_temp_c) : Tc;
+        if (Tc_crust > max_surf_t) max_surf_t = Tc_crust;
 
         float aw = fd_compute_water_activity(g->W[i], g->salt[i], x_sug);
+        float aw_skin = (Tc_crust > Tc + 8.0f) ? clampf(aw * 0.72f, 0.15f, 0.85f) : aw;
 
         /* Bell-shaped water activity factor for Maillard peaking around aw ~ 0.65 */
-        float daw = (aw - 0.65f) / 0.25f;
+        float daw = (aw_skin - 0.65f) / 0.25f;
         float aw_maillard = clampf(expf(-0.5f * daw * daw), 0.05f, 1.0f);
 
-        double k_mail = fd_arrhenius_rate(rx->maillard, Tc) * (double)(maillard_prec * aw_maillard * ph_maillard);
-        double k_cara = fd_arrhenius_rate(rx->caramel, Tc)  * (double)(caramel_prec * clampf(1.25f - aw, 0.15f, 1.2f));
+        double k_mail = fd_arrhenius_rate(rx->maillard, Tc_crust) * (double)(maillard_prec * aw_maillard * ph_maillard);
+        double k_cara = fd_arrhenius_rate(rx->caramel, Tc_crust)  * (double)(caramel_prec * clampf(1.25f - aw_skin, 0.15f, 1.2f));
         double k_char = (Tc > 175.0f) ? fd_arrhenius_rate(rx->pyrolysis, Tc) * (double)clampf(1.2f - aw, 0.2f, 1.2f) : 0.0;
 
         g->maillard[i]   = step_first_order(g->maillard[i],   k_mail, dt_sec);
@@ -92,8 +101,8 @@ void fd_chemistry_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_se
 
         float d_actin = g->denat_actin[i] - prev_actin;
         if (d_actin > 0.0f && g->W[i] > 0.42f) {
-            /* Actin myofibril shrinkage expels bound water (syneresis) */
-            float squeeze = 0.16f * d_actin * (g->W[i] - 0.42f);
+            /* Actin myofibril shrinkage expels bound water (attenuated by dry-brine/pounding mech_tender) */
+            float squeeze = 0.16f * (1.0f - 0.28f * sim->mech_tender) * d_actin * (g->W[i] - 0.42f);
             g->W[i] -= squeeze;
             sim->total_water_g = fmaxf(1.0f, sim->total_water_g - squeeze * sim->raw_weight_g / (float)fmaxf(1, g->active_count));
         }
@@ -119,14 +128,28 @@ void fd_chemistry_step(fd_sim_state_t *sim, const fd_database_t *db, float dt_se
         }
     }
 
-    /* Salt diffusion from surface brine/seasoning into outer cells */
+    /* Salt diffusion from surface brine/seasoning into outer cells (accelerated by knife cell rupture) */
     if (sim->salt_g > 0.01f) {
         float target_salt = clampf(sim->salt_g * w_inv, 0.0f, 0.12f);
+        float rup_boost = 1.0f + 0.85f * sim->cell_rupture;
         for (int i = 0; i < g->count; i++) {
             if (g->tissue[i] == FD_TISSUE_EMPTY) continue;
-            float rate = (g->surface_mask[i] != 0) ? 0.004f : 0.0006f;
+            float rate = ((g->surface_mask[i] != 0) ? 0.004f : 0.0006f) * rup_boost;
             g->salt[i] += (target_salt - g->salt[i]) * fminf(1.0f, rate * dt_sec);
         }
+    }
+
+    /* Pan fond deposition from conductive bottom-face Maillard melanoidins */
+    if (g->count > 1 && dry_pan) {
+        float bot_mail = 0.0f;
+        int bot_n = 0;
+        for (int i = 0; i < g->count; i++) {
+            if (g->tissue[i] != FD_TISSUE_EMPTY && (g->surface_mask[i] & FD_FACE_NEG_Z)) {
+                bot_mail += g->maillard[i];
+                bot_n++;
+            }
+        }
+        if (bot_n > 0) sim->fond_maillard = fmaxf(sim->fond_maillard, 0.78f * (bot_mail / (float)bot_n));
     }
 
     if (sim->smoke_point_min_c > 50.0f && max_surf_t > sim->smoke_point_min_c) {

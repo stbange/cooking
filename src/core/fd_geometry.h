@@ -30,6 +30,8 @@ void fd_grid_rasterize(fd_grid_t *g, fd_shape_type_t shape,
 void fd_grid_update_surfaces(fd_grid_t *g);
 void fd_grid_flip_z(fd_grid_t *g);
 void fd_grid_toss_cubes(fd_grid_t *g);
+bool fd_grid_resize_preserve(fd_grid_t *g, fd_shape_type_t new_shape,
+                             float lx_mm, float ly_mm, float lz_mm, bool coarse_mode);
 
 /* Extract a 2D orthogonal cross-section slice into RGBA8888 pixels (max 32x32) */
 void fd_grid_extract_slice(const fd_grid_t *g, fd_slice_plane_t plane, int slice_idx,

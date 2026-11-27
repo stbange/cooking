@@ -8,11 +8,36 @@
 #define FD_MAX_GRID_DIM     32
 #define FD_MAX_CELLS        (FD_MAX_GRID_DIM * FD_MAX_GRID_DIM * FD_MAX_GRID_DIM)
 #define FD_MAX_INGREDIENTS  160
-#define FD_MAX_TECHNIQUES   24
+#define FD_MAX_TECHNIQUES   28
 #define FD_MAX_RECIPES      64
-#define FD_MAX_STEPS        8
-#define FD_MAX_RECIPE_ITEMS 10
+#define FD_MAX_VESSELS      6
+#define FD_MAX_STEPS        14
+#define FD_MAX_RECIPE_ITEMS 14
 #define FD_HISTORY_LEN      180
+
+/* Kitchen station / vessel archetypes */
+typedef enum {
+    FD_VESSEL_BOARD   = 0, /* Cutting / prep board */
+    FD_VESSEL_BOWL    = 1, /* Mixing / whisking / marinating bowl */
+    FD_VESSEL_SKILLET = 2, /* Pan / sauteuse / wok */
+    FD_VESSEL_POT     = 3, /* Saucepan / stockpot / Dutch oven / bath */
+    FD_VESSEL_OVEN    = 4, /* Roasting deck / baking dish / ramekin */
+    FD_VESSEL_PLATE   = 5  /* Resting rack / warm serving plate */
+} fd_vessel_kind_t;
+
+/* Thermal, mechanical movement, and cross-vessel step actions */
+typedef enum {
+    FD_ACT_COOK       = 0, /* Thermal heating, chilling, curing, or proofing */
+    FD_ACT_CUT_PREP   = 1, /* Knife dicing/slicing/mincing (3D voxel resize + cell rupture) */
+    FD_ACT_POUND      = 2, /* Mechanical flattening / myofibril tenderizing */
+    FD_ACT_SALT_BRINE = 3, /* Dry-brine / seasoning NaCl diffusion & myosin solubilization */
+    FD_ACT_WHISK      = 4, /* High-shear droplet emulsification & air foam whipping */
+    FD_ACT_KNEAD      = 5, /* Dough hydration alignment into viscoelastic gluten network */
+    FD_ACT_FOLD_STIR  = 6, /* Gentle foam-preserving fold or thermal stir/toss */
+    FD_ACT_DEGLAZE    = 7, /* Dissolve browned pan fond into liquid / pan sauce */
+    FD_ACT_COMBINE    = 8, /* Enthalpy- & mass-conserving transfer from vessel -> target_vessel */
+    FD_ACT_REST       = 9  /* Off-heat 3D carryover equilibration & juice reabsorption */
+} fd_step_action_t;
 
 /* Voxel tissue occupancy types */
 typedef enum {
@@ -158,16 +183,38 @@ typedef struct {
 } fd_reactions_t;
 
 typedef struct {
-    char ingredient_id[48];
+    char             id[24];
+    char             name[48];
+    fd_vessel_kind_t kind;
+    fd_shape_type_t  shape;
+    float            lx_mm, ly_mm, lz_mm;
+    float            init_temp_c;
+} fd_vessel_spec_t;
+
+typedef struct {
+    char  ingredient_id[48];
     float mass_g;
+    int   vessel_idx;    /* Target vessel [0..vessel_count-1], default 0 */
+    int   add_at_step;   /* 0 = initial mise en place, >0 = staged at 0-indexed step */
+    char  prep_note[40]; /* e.g. "25mm cubes", "1.5mm brunoise", "cold cubed" */
 } fd_recipe_item_t;
 
 typedef struct {
-    char technique_id[32];
-    float temp_c;
-    float duration_sec;
-    bool  flip_midway;
-    bool  lid_closed;
+    char             technique_id[32];
+    float            temp_c;
+    float            duration_sec;
+    bool             flip_midway;
+    bool             lid_closed;
+    fd_step_action_t action;            /* Default FD_ACT_COOK (0) */
+    int              vessel_idx;        /* Primary vessel acted on */
+    int              target_vessel_idx; /* Destination for COMBINE/FOLD_STIR/DEGLAZE (-1 = same) */
+    float            agitation;         /* [0..1] whisking/folding/kneading intensity */
+    float            cut_lx_mm, cut_ly_mm, cut_lz_mm;
+    fd_shape_type_t  cut_shape;
+    bool             has_cut_shape;
+    bool             parallel;          /* Concurrent with preceding vessel step */
+    char             instruction[200];  /* Detailed chef-executable step instruction */
+    char             cue_why[160];      /* Sensory/thermal cue & first-principles rationale */
 } fd_recipe_step_t;
 
 typedef struct {
@@ -177,6 +224,8 @@ typedef struct {
     char notes[160];
     fd_shape_type_t shape;
     float lx_mm, ly_mm, lz_mm;
+    int vessel_count;
+    fd_vessel_spec_t vessels[FD_MAX_VESSELS];
     int item_count;
     fd_recipe_item_t items[FD_MAX_RECIPE_ITEMS];
     int step_count;
@@ -333,12 +382,41 @@ typedef struct {
     float hist_moisture[FD_HISTORY_LEN];
     double last_hist_sec;
 
+    /* Vessel metadata & non-thermal mechanical states */
+    char             vessel_name[48];
+    fd_vessel_kind_t vessel_kind;
+    fd_shape_type_t  shape;
+    bool             burner_on;
+    bool             consumed;      /* Emptied into another vessel via COMBINE/DEGLAZE */
+    float            cell_rupture;  /* [0..1] knife dicing/mincing cell disruption */
+    float            foam_air;      /* [0..0.72] whipped air bubble fraction */
+    float            whip_overwork; /* >1.0 triggers mechanical foam weeping/collapse */
+    float            emulsion_shear_integral; /* Integrated shear work s^-1*s */
+    float            gluten_network;/* [0..1] hydrated wheat gluten alignment */
+    float            mech_tender;   /* [0..1] pounding / dry-brine myofibril disruption */
+    float            rested_frac;   /* [0..1] carryover juice reabsorption */
+    float            fond_maillard; /* [0..1] soluble browned pan fond on vessel floor */
+
     /* Audio physical flux outputs */
     float sizzle_flux;
     float boil_flux;
 
     fd_metrics_t metrics;
 } fd_sim_state_t;
+
+/* Holistic Multi-Vessel Kitchen Coordinator */
+typedef struct {
+    fd_recipe_t    recipe;
+    bool           has_recipe;
+    bool           coarse_mode;
+    int            vessel_count;
+    int            active_vessel;  /* Currently inspected vessel [0..vessel_count-1] */
+    int            current_step;   /* Next step index to execute [0..step_count] */
+    double         wall_time_sec;
+    float          sizzle_flux;
+    float          boil_flux;
+    fd_sim_state_t vessels[FD_MAX_VESSELS];
+} fd_kitchen_t;
 
 /* Culinary Database Registry populated from Lua */
 typedef struct {

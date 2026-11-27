@@ -1,0 +1,13 @@
+# Proposal: Holistic Multi-Vessel Kitchen, Movement Physics & Detailed Executable Recipes
+
+## Why
+Real cooking is rarely a single pot heated with all ingredients dumped in at `t = 0`. A cook prepares ingredients on a cutting board (changing 3D cut dimensions, exposed surface area, and cellular rupture), whisks cold or warm emulsions and foams in mixing bowls, boils pasta or stock in one pot while searing meat in a skillet, deglazes browned pan fond, folds delicate foams without knocking out air, combines components across vessels with thermal equilibration, and rests roasted proteins before carving. Every detail changes the physical, chemical, biological, and sensory outcome, and cooks expect complete, step-by-step executable recipes.
+
+## What Changes
+- **Multi-Vessel Kitchen Engine (`fd_kitchen_t`)**: Supports up to 6 simultaneous stations/vessels (`Prep Board`, `Mixing/Whisk Bowl`, `Skillet`, `Saucepan/Pot`, `Oven/Bath`, `Resting/Plate`), staged ingredient additions (`vessel_idx`, `add_at_step`, `prep_note`), parallel vessel steps, and enthalpy-conserving cross-vessel transfers (`FD_ACT_COMBINE`, `FD_ACT_DEGLAZE`, `FD_ACT_FOLD_STIR`).
+- **Movement & Non-Thermal First-Principles Mechanics**: Models knife cutting/dicing (`FD_ACT_CUT_PREP`: 3D voxel resizing, surface-to-volume acceleration, `cell_rupture` aroma/amine release, and un-rested hot meat purge loss), pounding (`FD_ACT_POUND`: thickness compression + `mech_tender`), dry-brining (`FD_ACT_SALT_BRINE`), whisking/whipping (`FD_ACT_WHISK`: shear droplet breakup + `foam_air` porosity + over-whipping/curdling limits), kneading (`FD_ACT_KNEAD`: wheat `gluten_network` gas retention), gentle folding vs harsh stirring (`FD_ACT_FOLD_STIR`), pan fond formation & deglazing (`FD_ACT_DEGLAZE`), and carryover resting & juice reabsorption (`FD_ACT_REST`).
+- **Detailed Human-Executable Recipes & Multi-Station Solver**: Enriches Lua recipes and upgrades `fd_solver` so classic, adapted, and de novo invented recipes produce complete multi-vessel workflows with exact gram weights, `mm` cut sizes, vessel assignments, temperatures, durations, movement intensities, and scientific doneness cues (`fd_recipe_describe_step`).
+- **Holistic Kitchen Lab UI & 20-Language Localization**: Adds the multi-vessel station switcher, live movement/prep action bar, step-by-step recipe executor, and full Chef Recipe Card modal across Desktop and Mobile Touch in all 20 world languages.
+
+## Impact
+- Touches `src/core/{fd_types.h,fd_sim.h,fd_sim.c,fd_physics.c,fd_chemistry.c,fd_biology.c,fd_lua.c,fd_solver.c,fd_app.h,fd_app.c}`, `src/platform/main.c`, `assets/scripts/{techniques.lua,recipes/*.lua}`, `assets/locales/*.lua`, `docs/HELP.md`, and tests (`>=95%` line coverage preserved).

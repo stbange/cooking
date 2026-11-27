@@ -93,17 +93,80 @@ static void verify_rs3_glycemic_retrogradation_and_braise_collagen(const fd_data
     fd_sim_free(&braise);
 }
 
+static void verify_movement_and_multivessel_physics(const fd_database_t *db, fd_lua_t *lua) {
+    /* 1. Knife Cut L^2 Conduction & Cell Rupture: 12mm dice vs 42mm chunk */
+    fd_sim_state_t fine_cut, coarse_cut;
+    memset(&fine_cut, 0, sizeof(fine_cut));
+    memset(&coarse_cut, 0, sizeof(coarse_cut));
+    fd_recipe_item_t veg[2] = { { .ingredient_id = "carrot", .mass_g = 150.0f }, { .ingredient_id = "garlic", .mass_g = 15.0f } };
+    assert(fd_sim_init_dish(&fine_cut,   db, veg, 2, FD_SHAPE_CUBE, 42.0f, 42.0f, 42.0f, 20.0f, true));
+    assert(fd_sim_init_dish(&coarse_cut, db, veg, 2, FD_SHAPE_CUBE, 42.0f, 42.0f, 42.0f, 20.0f, true));
+    assert(fd_sim_apply_action(&fine_cut, db, lua, FD_ACT_CUT_PREP, 0.8f, 12.0f, 12.0f, 12.0f, FD_SHAPE_CUBE, true, 20.0f, 30.0f, true));
+    fd_sim_set_technique(&fine_cut,   db, "saute_stirfry", 185.0f, false);
+    fd_sim_set_technique(&coarse_cut, db, "saute_stirfry", 185.0f, false);
+    fd_sim_step(&fine_cut,   db, lua, 180.0f);
+    fd_sim_step(&coarse_cut, db, lua, 180.0f);
+    printf("[Knife Prep L^2] 12mm Core=%.1f°C Aroma=%.2f vs 42mm Core=%.1f°C Aroma=%.2f\n",
+           fine_cut.metrics.core_temp_c, fine_cut.metrics.aroma,
+           coarse_cut.metrics.core_temp_c, coarse_cut.metrics.aroma);
+    assert(fine_cut.metrics.core_temp_c > coarse_cut.metrics.core_temp_c + 12.0f);
+    assert(fine_cut.metrics.aroma > coarse_cut.metrics.aroma);
+    fd_sim_free(&fine_cut);
+    fd_sim_free(&coarse_cut);
+
+    /* 2. Gentle Folding vs Harsh Stirring on Whipped Chocolate Fondant Foam */
+    int idx_fond = fd_db_find_recipe(db, "chocolate_fondant");
+    assert(idx_fond >= 0);
+    fd_recipe_t folded = db->recipes[idx_fond];
+    fd_recipe_t harsh  = db->recipes[idx_fond];
+    for (int s = 0; s < harsh.step_count; s++) {
+        if (harsh.steps[s].action == FD_ACT_FOLD_STIR || harsh.steps[s].action == FD_ACT_COMBINE) {
+            harsh.steps[s].agitation = 0.95f; /* Over-mix with high shear! */
+        }
+    }
+    fd_sim_state_t s_fold, s_harsh;
+    memset(&s_fold, 0, sizeof(s_fold));
+    memset(&s_harsh, 0, sizeof(s_harsh));
+    assert(fd_sim_run_recipe(&s_fold,  db, lua, &folded, true));
+    assert(fd_sim_run_recipe(&s_harsh, db, lua, &harsh,  true));
+    printf("[Foam Folding] Gentle Fold Porosity=%.1f%% vs Harsh Stir Porosity=%.1f%%\n",
+           s_fold.metrics.avg_porosity * 100.0f, s_harsh.metrics.avg_porosity * 100.0f);
+    assert(s_fold.metrics.avg_porosity > s_harsh.metrics.avg_porosity + 0.08f);
+    fd_sim_free(&s_fold);
+    fd_sim_free(&s_harsh);
+
+    /* 3. Multi-Vessel Roman Carbonara: 65°C off-heat tempering vs 95°C scrambled skillet */
+    int idx_carb = fd_db_find_recipe(db, "pasta_carbonara");
+    assert(idx_carb >= 0);
+    fd_recipe_t good_carb = db->recipes[idx_carb];
+    fd_recipe_t bad_carb  = db->recipes[idx_carb];
+    bad_carb.steps[bad_carb.step_count - 1].temp_c = 96.0f; /* Dump yolks over blazing burner! */
+    fd_sim_state_t s_good, s_bad;
+    memset(&s_good, 0, sizeof(s_good));
+    memset(&s_bad, 0, sizeof(s_bad));
+    assert(fd_sim_run_recipe(&s_good, db, lua, &good_carb, true));
+    assert(fd_sim_run_recipe(&s_bad,  db, lua, &bad_carb,  true));
+    printf("[Carbonara Multi-Vessel] 65°C Temper Emulsion=%.0f%% (Safe=%d) vs 96°C Scramble=%.0f%%\n",
+           s_good.metrics.emulsion_stability * 100.0f, s_good.metrics.is_pasteurized_safe ? 1 : 0,
+           s_bad.metrics.emulsion_stability * 100.0f);
+    assert(s_good.metrics.is_pasteurized_safe);
+    assert(s_good.metrics.emulsion_stability > s_bad.metrics.emulsion_stability + 0.15f);
+    fd_sim_free(&s_good);
+    fd_sim_free(&s_bad);
+}
+
 static void verify_all_classic_recipes(const fd_database_t *db, fd_lua_t *lua) {
-    printf("=== Simulating all %d recipes in ./assets/scripts/recipes/ ===\n", db->recipe_count);
-    assert(db->recipe_count >= 32);
+    printf("=== Simulating all %d multi-station recipes in ./assets/scripts/recipes/ ===\n", db->recipe_count);
+    assert(db->recipe_count >= 34);
     int bad = 0;
     for (int i = 0; i < db->recipe_count; i++) {
         fd_sim_state_t sim;
         memset(&sim, 0, sizeof(sim));
         const fd_recipe_t *r = &db->recipes[i];
         assert(fd_sim_run_recipe(&sim, db, lua, r, true));
-        printf("  [%02d] %-38s Score=%5.1f Cold=%.1fC(%.1fD) Surf=%.1fC Char=%.2f Safe=%d\n",
-               i + 1, r->id, sim.metrics.overall_score, sim.metrics.cold_spot_temp_c,
+        printf("  [%02d] %-36s (%dv/%ds) Score=%5.1f Cold=%.1fC(%.1fD) Surf=%.1fC Char=%.2f Safe=%d\n",
+               i + 1, r->id, r->vessel_count, r->step_count,
+               sim.metrics.overall_score, sim.metrics.cold_spot_temp_c,
                sim.metrics.cold_spot_lethality_log10, sim.metrics.surface_max_temp_c,
                sim.metrics.max_char, sim.metrics.is_pasteurized_safe ? 1 : 0);
         if (isnan(sim.metrics.overall_score) || isnan(sim.metrics.kcal_total) ||
@@ -128,10 +191,11 @@ int main(void) {
     verify_3d_corner_vs_edge_vs_face_physics(&db);
     verify_tapered_fillet_asymmetric_cold_spot(&db);
     verify_rs3_glycemic_retrogradation_and_braise_collagen(&db, &lua);
+    verify_movement_and_multivessel_physics(&db, &lua);
     verify_all_classic_recipes(&db, &lua);
 
     fd_lua_free(&lua);
     fd_vfs_free(&vfs);
-    printf("ALL 3D FIRST-PRINCIPLES SCIENCE BENCHMARKS PASSED.\n");
+    printf("ALL 3D FIRST-PRINCIPLES & MULTI-VESSEL SCIENCE BENCHMARKS PASSED.\n");
     return 0;
 }
